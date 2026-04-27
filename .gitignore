@@ -1,0 +1,24 @@
+# Xcode
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside
+
+# Swift Package Manager
+.build/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# Logs and local diagnostics
+*.log
+*.xcresult
+
+# Generated archives
+*.xcarchive
+*.ipa
+*.dSYM.zip
+*.dSYM
