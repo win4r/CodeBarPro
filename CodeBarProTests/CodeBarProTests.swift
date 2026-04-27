@@ -396,6 +396,28 @@ struct CodeBarProTests {
         #expect(rateLimits.tertiary?.usedPercent == 56)
     }
 
+    @Test func claudeCLIUsageOutputInfersCompactUsageStatsWindows() throws {
+        let output = """
+        Status Config Usage Stats
+        Usage: 0 input, 0 output, 0 cache read, 0 cache write
+        10% used
+        Resets 3:50am (America/Los_Angeles)
+        4% used
+        Resets May 2 at 7pm (America/Los_Angeles)
+        What's contributing to your limits usage?
+        """
+
+        let rateLimits = try ClaudeUsageProbe.rateLimits(
+            fromCLIUsageOutput: output,
+            observedAt: try date("2026-04-27T18:00:00Z"))
+
+        #expect(rateLimits.primary?.usedPercent == 10)
+        #expect(rateLimits.primary?.windowMinutes == 300)
+        #expect(rateLimits.secondary?.usedPercent == 4)
+        #expect(rateLimits.secondary?.windowMinutes == 10_080)
+        #expect(rateLimits.tertiary == nil)
+    }
+
     @Test func claudeCLIUsageOutputMapsUsedPercentages() throws {
         let output = """
         Current session

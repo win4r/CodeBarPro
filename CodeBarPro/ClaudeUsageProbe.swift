@@ -161,6 +161,8 @@ enum ClaudeUsageProbe {
         let panel = latestUsagePanel(in: clean) ?? clean
         let lines = panel.components(separatedBy: .newlines)
         let context = LabelSearchContext(lines: lines)
+        let orderedPercentages = allPercentUsages(in: panel)
+        let canInferUnlabeledQuotaWindows = canInferUnlabeledQuotaWindows(in: panel)
 
         var primaryUsed = percentUsed(
             labelSubstrings: ["Current session"],
@@ -179,15 +181,14 @@ enum ClaudeUsageProbe {
             || (hasWeeklyLabel && secondaryUsed == nil)
             || (hasModelSpecificLabel && modelSpecificUsed == nil)
         {
-            let ordered = allPercentUsages(in: panel)
-            if primaryUsed == nil, ordered.indices.contains(0) {
-                primaryUsed = ordered[0]
+            if primaryUsed == nil, orderedPercentages.indices.contains(0) {
+                primaryUsed = orderedPercentages[0]
             }
-            if hasWeeklyLabel, secondaryUsed == nil, ordered.indices.contains(1) {
-                secondaryUsed = ordered[1]
+            if hasWeeklyLabel, secondaryUsed == nil, orderedPercentages.indices.contains(1) {
+                secondaryUsed = orderedPercentages[1]
             }
-            if hasModelSpecificLabel, modelSpecificUsed == nil, ordered.indices.contains(2) {
-                modelSpecificUsed = ordered[2]
+            if hasModelSpecificLabel, modelSpecificUsed == nil, orderedPercentages.indices.contains(2) {
+                modelSpecificUsed = orderedPercentages[2]
             }
         }
 
@@ -197,6 +198,21 @@ enum ClaudeUsageProbe {
                     "Claude CLI /usage did not return quota percentages; remote usage data stayed loading.")
             }
             throw ClaudeUsageProbeError.cliUsageFailed("Claude CLI /usage did not include Current session.")
+        }
+
+        if secondaryUsed == nil,
+           !hasWeeklyLabel,
+           canInferUnlabeledQuotaWindows,
+           orderedPercentages.indices.contains(1)
+        {
+            secondaryUsed = orderedPercentages[1]
+        }
+        if modelSpecificUsed == nil,
+           !hasModelSpecificLabel,
+           canInferUnlabeledQuotaWindows,
+           orderedPercentages.indices.contains(2)
+        {
+            modelSpecificUsed = orderedPercentages[2]
         }
 
         let modelSpecificTitle = context.contains("currentweekopus")
@@ -744,6 +760,14 @@ enum ClaudeUsageProbe {
             }
             return max(0, min(100, rawPercent))
         }
+    }
+
+    private nonisolated static func canInferUnlabeledQuotaWindows(in text: String) -> Bool {
+        let normalized = normalizedForLabelSearch(text)
+        return normalized.contains("usagestats")
+            && normalized.contains("resets")
+            && (normalized.contains("whatscontributingtoyourlimitsusage")
+                || normalized.contains("planusage"))
     }
 
     private nonisolated static func resetText(in line: String) -> String? {
