@@ -20,6 +20,13 @@ struct ProviderRateLimitFetchResult: Equatable, Sendable {
 }
 
 enum ClaudeUsageProbe {
+    enum FallbackSource: Equatable, Sendable {
+        case cli
+        case web
+    }
+
+    nonisolated static let appFallbackSourcesAfterOAuth: [FallbackSource] = [.cli, .web]
+
     private nonisolated static let serviceName = "Claude Code-credentials"
     private nonisolated static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private nonisolated static let claudeWebBaseURL = "https://claude.ai/api"
@@ -36,6 +43,7 @@ enum ClaudeUsageProbe {
         let now = Date()
         let oauthBackoff = oauthBackoffUntil(now: now)
         var oauthFailure: String?
+        var cliFailure: String?
         var webFailure: String?
 
         if let oauthBackoff {
@@ -62,32 +70,40 @@ enum ClaudeUsageProbe {
             }
         }
 
-        do {
-            let usageResult = try await fetchWebUsageResult(observedAt: now)
-            return ProviderRateLimitFetchResult(
-                rateLimits: usageResult.rateLimits,
-                supplementalMetrics: usageResult.supplementalMetrics,
-                source: "Claude Web",
-                failureReason: nil)
-        } catch {
-            webFailure = error.localizedDescription
+        for fallbackSource in appFallbackSourcesAfterOAuth {
+            switch fallbackSource {
+            case .cli:
+                do {
+                    let rateLimits = try await fetchCLIRateLimits(observedAt: now)
+                    return ProviderRateLimitFetchResult(
+                        rateLimits: rateLimits,
+                        supplementalMetrics: await fetchWebSupplementalMetrics(),
+                        source: "Claude CLI /usage",
+                        failureReason: nil)
+                } catch {
+                    cliFailure = error.localizedDescription
+                }
+            case .web:
+                do {
+                    let usageResult = try await fetchWebUsageResult(observedAt: now)
+                    return ProviderRateLimitFetchResult(
+                        rateLimits: usageResult.rateLimits,
+                        supplementalMetrics: usageResult.supplementalMetrics,
+                        source: "Claude Web",
+                        failureReason: nil)
+                } catch {
+                    webFailure = error.localizedDescription
+                }
+            }
         }
 
-        do {
-            let rateLimits = try await fetchCLIRateLimits(observedAt: now)
-            return ProviderRateLimitFetchResult(
-                rateLimits: rateLimits,
-                source: "Claude CLI /usage",
-                failureReason: nil)
-        } catch {
-            let failureReason = [oauthFailure, webFailure, error.localizedDescription]
-                .compactMap { $0 }
-                .joined(separator: " ")
-            return ProviderRateLimitFetchResult(
-                rateLimits: nil,
-                source: nil,
-                failureReason: failureReason.isEmpty ? nil : failureReason)
-        }
+        let failureReason = [oauthFailure, cliFailure, webFailure]
+            .compactMap { $0 }
+            .joined(separator: " ")
+        return ProviderRateLimitFetchResult(
+            rateLimits: nil,
+            source: nil,
+            failureReason: failureReason.isEmpty ? nil : failureReason)
     }
 
     nonisolated static func credential(from data: Data) -> ClaudeOAuthCredential? {
@@ -376,6 +392,14 @@ enum ClaudeUsageProbe {
             supplemental.append(extraCost)
         }
         return (try rateLimits(from: usage, observedAt: observedAt), supplemental)
+    }
+
+    private nonisolated static func fetchWebSupplementalMetrics() async -> [UsageMetric] {
+        do {
+            return try await fetchWebUsageResult(observedAt: Date()).supplementalMetrics
+        } catch {
+            return []
+        }
     }
 
     private nonisolated static func fetchWebOrganization(
@@ -1525,7 +1549,7 @@ struct ClaudeExtraUsage: Decodable, Equatable, Sendable {
     }
 }
 
-private struct ClaudeOverageSpendLimitResponse: Decodable, Equatable, Sendable {
+struct ClaudeOverageSpendLimitResponse: Decodable, Equatable, Sendable {
     var monthlyCreditLimit: Double?
     var currency: String?
     var usedCredits: Double?
@@ -1566,7 +1590,8 @@ private struct ClaudeOverageSpendLimitResponse: Decodable, Equatable, Sendable {
     nonisolated var usageMetric: UsageMetric? {
         guard isEnabled == true,
               let usedCredits,
-              let monthlyCreditLimit
+              let monthlyCreditLimit,
+              let currencyCode = Self.normalizedCurrencyCode(currency)
         else {
             return nil
         }
@@ -1578,8 +1603,13 @@ private struct ClaudeOverageSpendLimitResponse: Decodable, Equatable, Sendable {
             used: normalized.used,
             limit: normalized.limit,
             unit: .currency,
-            currencyCode: ClaudeUsageProbe.normalizedCurrencyCode(currency),
+            currencyCode: currencyCode,
             resetsAt: nil)
+    }
+
+    private nonisolated static func normalizedCurrencyCode(_ code: String?) -> String? {
+        let trimmed = code?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty ?? true) ? nil : trimmed!.uppercased()
     }
 }
 

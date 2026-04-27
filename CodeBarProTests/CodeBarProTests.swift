@@ -116,6 +116,10 @@ struct CodeBarProTests {
         #expect(credential?.subscriptionType == "pro")
     }
 
+    @Test func claudeAppFallbackOrderPrefersCLIBeforeWeb() {
+        #expect(ClaudeUsageProbe.appFallbackSourcesAfterOAuth == [.cli, .web])
+    }
+
     @Test func claudeOAuthUsageMapsSessionAndWeeklyPercentages() throws {
         let json = """
         {
@@ -185,6 +189,41 @@ struct CodeBarProTests {
         #expect(supplemental[1].formattedValue == "0%")
         #expect(supplemental[2].formattedValue == "$4.50")
         #expect(supplemental[2].limit == 20)
+    }
+
+    @Test func claudeWebOverageRequiresCurrency() throws {
+        let json = """
+        {
+          "monthly_credit_limit": 5000,
+          "used_credits": 1200,
+          "is_enabled": true
+        }
+        """
+
+        let overage = try JSONDecoder().decode(
+            ClaudeOverageSpendLimitResponse.self,
+            from: try #require(json.data(using: .utf8)))
+
+        #expect(overage.usageMetric == nil)
+    }
+
+    @Test func claudeWebOverageMapsCurrencyAmounts() throws {
+        let json = """
+        {
+          "monthly_credit_limit": 5000,
+          "used_credits": 1200,
+          "currency": "USD",
+          "is_enabled": true
+        }
+        """
+
+        let overage = try JSONDecoder().decode(
+            ClaudeOverageSpendLimitResponse.self,
+            from: try #require(json.data(using: .utf8)))
+        let metric = try #require(overage.usageMetric)
+
+        #expect(metric.formattedValue == "$12.00")
+        #expect(metric.limit == 50)
     }
 
     @Test func claudeSnapshotPrefersOAuthRateLimitPercentages() {
