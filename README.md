@@ -1,38 +1,66 @@
 # CodeBar Pro
 
+![macOS](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)
+![Swift](https://img.shields.io/badge/Swift-5-orange?logo=swift)
+![Xcode](https://img.shields.io/badge/Xcode-16%2B-blue?logo=xcode)
+![Privacy](https://img.shields.io/badge/privacy-local--first-brightgreen)
+
 [中文说明](README.zh-CN.md)
 
-CodeBar Pro is a native macOS menu bar app for tracking local AI coding assistant activity. It gives you a compact status item, a popover with provider usage, and settings for refresh cadence and display preferences.
+CodeBar Pro is a polished native macOS menu bar app for keeping an eye on local AI coding assistant activity. It turns scattered local usage logs into a compact menu bar signal, a readable popover, and a small set of practical controls.
 
-## Features
+It is built for developers who want quick visibility without opening a terminal, digging through JSONL files, or switching into a dashboard.
 
-- Native AppKit and SwiftUI menu bar experience.
-- Tracks Codex and Claude Code activity from local JSONL logs.
-- Shows today and last-30-days usage as token or event totals.
-- Detects local CLI availability and version information.
-- Supports manual refresh and automatic refresh intervals.
-- Lets you enable or disable providers independently.
-- Runs as an accessory app with no Dock icon.
-- Keeps usage analysis local to your Mac.
+## ✨ Highlights
 
-## Requirements
+- 🧭 **Menu bar first** - lives quietly in the macOS menu bar with no Dock icon.
+- 📊 **Fast usage overview** - shows today and last-30-days activity for each provider.
+- 🔢 **Token-aware metrics** - prefers token counters when available and falls back to event counts.
+- 🧩 **Multiple providers** - supports Codex and Claude Code activity sources.
+- 🔍 **Local CLI detection** - checks installed command-line tools and shows version details.
+- 🕒 **Flexible refresh** - choose manual refresh or automatic intervals.
+- 🎛️ **Provider toggles** - enable or disable providers independently.
+- 🛡️ **Local-first privacy** - scans local files only and does not upload usage data.
+- ⚙️ **Native implementation** - AppKit status item, SwiftUI views, and no web wrapper.
+
+## 🖥️ What You See
+
+CodeBar Pro gives you three main surfaces:
+
+| Surface | Purpose |
+| --- | --- |
+| Menu bar item | Shows the active provider name or current used amount. |
+| Popover | Displays provider cards, status, today usage, last-30-days usage, and refresh controls. |
+| Settings window | Lets you configure providers, refresh cadence, and menu bar display behavior. |
+
+## 📦 Requirements
 
 - macOS 14.0 or later.
 - Xcode 16 or later.
-- Optional: `codex` and/or `claude` CLI installed if you want version detection.
-- Local activity logs under `~/.codex` or `~/.claude/projects`.
+- Optional: `codex` and/or `claude` CLI installed for version detection.
+- Local provider activity logs, when available:
+  - `~/.codex`
+  - `~/.claude/projects`
 
-## Build and Run
+The app still opens when a CLI or log directory is missing. Missing providers are shown clearly in the UI instead of failing silently.
 
-Open the project in Xcode:
+## 🚀 Run From Xcode
+
+Open the project:
 
 ```bash
 open CodeBarPro.xcodeproj
 ```
 
-Select the `CodeBarPro` scheme, then run it on `My Mac`.
+Then:
 
-You can also build from the command line:
+1. Select the `CodeBarPro` scheme.
+2. Choose `My Mac` as the destination.
+3. Press Run.
+
+The app appears in the macOS menu bar as an accessory app.
+
+## 🛠️ Build From Terminal
 
 ```bash
 xcodebuild build \
@@ -42,7 +70,7 @@ xcodebuild build \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-## Test
+## ✅ Test
 
 ```bash
 xcodebuild test \
@@ -54,16 +82,96 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-## Privacy
+Current test coverage focuses on:
 
-CodeBar Pro scans local usage logs on your machine and does not upload usage data. CLI version checks are executed locally through the installed command-line tools.
+- JSONL token scanning.
+- Per-record date bucketing.
+- Deduplication of nested log roots.
+- Cache invalidation when files change.
+- Command execution, timeout handling, large output draining, and non-zero exits.
+- Preference persistence for refresh cadence and provider enablement.
 
-## Project Structure
+## 🧠 How It Works
 
-- `CodeBarPro/` - macOS app source.
-- `CodeBarProTests/` - unit tests for scanning, command execution, caching, and preferences.
-- `CodeBarProUITests/` - UI test target scaffold.
+CodeBar Pro collects data through a small local pipeline:
 
-## Notes
+1. Resolve provider CLIs from common shell paths and Node version manager paths.
+2. Run version checks with bounded command timeouts.
+3. Discover local JSONL activity logs.
+4. Deduplicate discovered file paths.
+5. Scan the most recent logs first.
+6. Parse each JSONL record and bucket usage by record timestamp.
+7. Publish provider snapshots back to the menu bar UI.
 
-The app is designed for local development workflows where you want quick visibility into coding assistant activity without opening a terminal or dashboard.
+The scanner caps work to the most recent 1,500 JSONL files per provider to keep refreshes responsive.
+
+## 🔐 Privacy Model
+
+CodeBar Pro is designed around local inspection:
+
+- It reads local usage logs from your Mac.
+- It runs local CLI version checks.
+- It does not send usage data to a server.
+- It does not require an account, token, or network service.
+
+If your local provider logs contain sensitive prompts or metadata, they remain on disk where those provider tools already stored them. CodeBar Pro only computes aggregate counts for display.
+
+## ⚙️ Preferences
+
+| Setting | Description |
+| --- | --- |
+| Providers | Turn Codex and Claude Code monitoring on or off independently. |
+| Cadence | Pick manual, 1 minute, 2 minutes, 5 minutes, or 15 minutes. |
+| Refresh Now | Immediately re-scan enabled providers. |
+| Show used amount | Replace the menu bar provider label with the current usage value. |
+| Open local folders | Jump directly to `.codex` or `.claude` in Finder. |
+
+## 🧱 Project Structure
+
+```text
+CodeBarPro/
+├── CodeBarPro.xcodeproj
+├── CodeBarPro/
+│   ├── AppPreferences.swift
+│   ├── CodeBarProApp.swift
+│   ├── MenuBarViews.swift
+│   ├── ProviderProbe.swift
+│   ├── SettingsView.swift
+│   ├── StatusItemController.swift
+│   ├── UsageModels.swift
+│   └── UsageStore.swift
+├── CodeBarProTests/
+│   └── CodeBarProTests.swift
+├── CodeBarProUITests/
+└── README.zh-CN.md
+```
+
+## 🧰 Troubleshooting
+
+### CLI Missing
+
+Install the relevant command-line tool or make sure it is available from your shell `PATH`. CodeBar Pro checks common macOS shell paths and local Node version manager folders.
+
+### No local JSONL activity logs found
+
+Open the provider tool normally and run at least one session. CodeBar Pro can only summarize activity that exists in local logs.
+
+### Usage looks lower than expected
+
+Some logs may contain event records without token counters. In that case CodeBar Pro reports event totals instead of guessing token usage.
+
+### Xcode opens but the app is not visible
+
+CodeBar Pro is a menu bar utility. Look for the menu bar item near the right side of the macOS menu bar rather than in the Dock.
+
+## 🗺️ Roadmap Ideas
+
+- Optional screenshot assets for the README.
+- Exportable usage summaries.
+- More provider adapters.
+- Custom log directory configuration.
+- Signed release builds.
+
+## 🤝 Contributing
+
+Small, focused changes are easiest to review. Useful contributions include provider parsing improvements, test cases for new log formats, and UI refinements that preserve the lightweight menu bar workflow.
