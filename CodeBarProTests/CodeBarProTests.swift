@@ -297,6 +297,30 @@ struct CodeBarProTests {
         #expect(errorMessage == "Claude CLI /usage did not return quota percentages; remote usage data stayed loading.")
     }
 
+    @Test func claudeWebCookieHeaderIncludesFullCookieSet() {
+        let rows = [
+            ChromiumCookieRow(
+                hostKey: ".claude.ai",
+                name: "sessionKey",
+                value: "sk-ant-sid01-test",
+                encryptedValueHex: ""),
+            ChromiumCookieRow(
+                hostKey: ".claude.ai",
+                name: "cf_clearance",
+                value: "clearance",
+                encryptedValueHex: ""),
+            ChromiumCookieRow(
+                hostKey: "claude.ai",
+                name: "routingHint",
+                value: "hint",
+                encryptedValueHex: ""),
+        ]
+
+        let header = ClaudeUsageProbe.cookieHeader(from: rows, safeStoragePassword: nil)
+
+        #expect(header == "sessionKey=sk-ant-sid01-test; cf_clearance=clearance; routingHint=hint")
+    }
+
     @Test func claudeOAuthRetryAfterBackoffExpires() throws {
         let (defaults, suiteName) = try makeUserDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }

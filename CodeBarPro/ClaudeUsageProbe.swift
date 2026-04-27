@@ -6,6 +6,7 @@
 import Foundation
 import Darwin
 import Security
+import CommonCrypto
 
 struct ProviderRateLimitFetchResult: Equatable, Sendable {
     var rateLimits: LocalUsageScanner.RateLimitSnapshot?
@@ -20,8 +21,11 @@ struct ProviderRateLimitFetchResult: Equatable, Sendable {
 enum ClaudeUsageProbe {
     private nonisolated static let serviceName = "Claude Code-credentials"
     private nonisolated static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    private nonisolated static let claudeWebBaseURL = "https://claude.ai/api"
     private nonisolated static let betaHeader = "oauth-2025-04-20"
     private nonisolated static let fallbackUserAgentVersion = "2.1.0"
+    private nonisolated static let browserUserAgent =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
     private nonisolated static let sessionWindowMinutes = 5 * 60
     private nonisolated static let weeklyWindowMinutes = 7 * 24 * 60
     private nonisolated static let defaultRateLimitBackoff: TimeInterval = 15 * 60
@@ -31,6 +35,7 @@ enum ClaudeUsageProbe {
         let now = Date()
         let oauthBackoff = oauthBackoffUntil(now: now)
         var oauthFailure: String?
+        var webFailure: String?
 
         if let oauthBackoff {
             oauthFailure = "Claude usage endpoint is rate limited until \(formatTime(oauthBackoff))."
@@ -56,15 +61,25 @@ enum ClaudeUsageProbe {
         }
 
         do {
+            let rateLimits = try await fetchWebRateLimits(observedAt: now)
+            return ProviderRateLimitFetchResult(
+                rateLimits: rateLimits,
+                source: "Claude Web",
+                failureReason: nil)
+        } catch {
+            webFailure = error.localizedDescription
+        }
+
+        do {
             let rateLimits = try await fetchCLIRateLimits(observedAt: now)
             return ProviderRateLimitFetchResult(
                 rateLimits: rateLimits,
                 source: "Claude CLI /usage",
                 failureReason: nil)
         } catch {
-            let failureReason = [oauthFailure, error.localizedDescription]
+            let failureReason = [oauthFailure, webFailure, error.localizedDescription]
                 .compactMap { $0 }
-                .joined(separator: " Claude CLI fallback failed: ")
+                .joined(separator: " ")
             return ProviderRateLimitFetchResult(
                 rateLimits: nil,
                 source: nil,
@@ -220,9 +235,16 @@ enum ClaudeUsageProbe {
     }
 
     private nonisolated static func keychainCredential() -> ClaudeOAuthCredential? {
+        guard let data = keychainGenericPasswordData(service: serviceName) else {
+            return nil
+        }
+        return credential(from: data)
+    }
+
+    private nonisolated static func keychainGenericPasswordData(service: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
+            kSecAttrService as String: service,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -232,7 +254,7 @@ enum ClaudeUsageProbe {
         guard status == errSecSuccess, let data = result as? Data else {
             return nil
         }
-        return credential(from: data)
+        return data
     }
 
     private nonisolated static func fileCredential() -> ClaudeOAuthCredential? {
@@ -274,6 +296,87 @@ enum ClaudeUsageProbe {
         return try decodeOAuthUsage(data)
     }
 
+    private nonisolated static func fetchWebRateLimits(
+        observedAt: Date)
+        async throws -> LocalUsageScanner.RateLimitSnapshot
+    {
+        let cookieHeader = try await Task.detached(priority: .utility) {
+            try claudeWebCookieHeader()
+        }.value
+        let organization = try await fetchWebOrganization(cookieHeader: cookieHeader)
+        let usage = try await fetchWebUsage(orgID: organization.id, cookieHeader: cookieHeader)
+        return try rateLimits(from: usage, observedAt: observedAt)
+    }
+
+    private nonisolated static func fetchWebOrganization(
+        cookieHeader: String)
+        async throws -> ClaudeWebOrganization
+    {
+        guard let url = URL(string: "\(claudeWebBaseURL)/organizations") else {
+            throw ClaudeUsageProbeError.invalidResponse
+        }
+
+        var request = claudeWebRequest(url: url, cookieHeader: cookieHeader)
+        request.httpMethod = "GET"
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ClaudeUsageProbeError.invalidResponse
+        }
+
+        switch httpResponse.statusCode {
+        case 200:
+            let organizations = try JSONDecoder().decode([ClaudeWebOrganization].self, from: data)
+            guard let selected = organizations.first(where: { $0.hasChatCapability })
+                ?? organizations.first(where: { !$0.isAPIOnly })
+                ?? organizations.first
+            else {
+                throw ClaudeUsageProbeError.webUsageFailed("Claude Web did not return an organization.")
+            }
+            return selected
+        case 401, 403:
+            throw ClaudeUsageProbeError.webUsageFailed("Claude Web session is unauthorized or blocked.")
+        default:
+            throw ClaudeUsageProbeError.webUsageFailed("Claude Web returned HTTP \(httpResponse.statusCode).")
+        }
+    }
+
+    private nonisolated static func fetchWebUsage(
+        orgID: String,
+        cookieHeader: String)
+        async throws -> ClaudeOAuthUsageResponse
+    {
+        guard let url = URL(string: "\(claudeWebBaseURL)/organizations/\(orgID)/usage") else {
+            throw ClaudeUsageProbeError.invalidResponse
+        }
+
+        var request = claudeWebRequest(url: url, cookieHeader: cookieHeader)
+        request.httpMethod = "GET"
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ClaudeUsageProbeError.invalidResponse
+        }
+
+        switch httpResponse.statusCode {
+        case 200:
+            return try decodeOAuthUsage(data)
+        case 401, 403:
+            throw ClaudeUsageProbeError.webUsageFailed("Claude Web session is unauthorized or blocked.")
+        default:
+            throw ClaudeUsageProbeError.webUsageFailed("Claude Web usage returned HTTP \(httpResponse.statusCode).")
+        }
+    }
+
+    private nonisolated static func claudeWebRequest(url: URL, cookieHeader: String) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(browserUserAgent, forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
     private nonisolated static func fetchCLIRateLimits(
         observedAt: Date,
         timeout: TimeInterval = 14)
@@ -285,6 +388,116 @@ enum ClaudeUsageProbe {
 
         let output = try await ClaudePTYUsageRunner.captureUsage(binary: claudeBinary, timeout: timeout)
         return try rateLimits(fromCLIUsageOutput: output, observedAt: observedAt)
+    }
+
+    nonisolated static func claudeWebCookieHeader() throws -> String {
+        var lastError: String?
+        for source in chromiumCookieSources() {
+            do {
+                let rows = try chromiumCookieRows(in: source.cookieDatabaseURL)
+                guard !rows.isEmpty else { continue }
+                let safeStoragePassword = keychainGenericPasswordData(service: source.safeStorageService)
+                if let header = cookieHeader(from: rows, safeStoragePassword: safeStoragePassword) {
+                    return header
+                }
+            } catch {
+                lastError = error.localizedDescription
+            }
+        }
+
+        if let lastError {
+            throw ClaudeUsageProbeError.webUsageFailed("Claude browser cookies were not readable: \(lastError)")
+        }
+        throw ClaudeUsageProbeError.webUsageFailed("No Claude browser session cookie found.")
+    }
+
+    nonisolated static func cookieHeader(
+        from rows: [ChromiumCookieRow],
+        safeStoragePassword: Data?)
+        -> String?
+    {
+        var cookiesByName: [String: String] = [:]
+        var orderedNames: [String] = []
+
+        for row in rows {
+            guard !row.name.isEmpty else { continue }
+            let value: String?
+            if !row.value.isEmpty {
+                value = row.value
+            } else if let safeStoragePassword {
+                value = decryptChromiumCookieValue(
+                    encryptedHex: row.encryptedValueHex,
+                    hostKey: row.hostKey,
+                    safeStoragePassword: safeStoragePassword)
+            } else {
+                value = nil
+            }
+
+            guard let value,
+                  !value.isEmpty,
+                  cookiesByName[row.name] == nil
+            else {
+                continue
+            }
+            cookiesByName[row.name] = value
+            orderedNames.append(row.name)
+        }
+
+        guard let sessionKey = cookiesByName["sessionKey"],
+              sessionKey.hasPrefix("sk-ant-")
+        else {
+            return nil
+        }
+
+        let preferredOrder = ["sessionKey", "cf_clearance", "routingHint", "sessionKeyLC"]
+        var headerPairs: [String] = []
+        var emitted = Set<String>()
+
+        for name in preferredOrder + orderedNames {
+            guard !emitted.contains(name),
+                  let value = cookiesByName[name]
+            else {
+                continue
+            }
+            emitted.insert(name)
+            headerPairs.append("\(name)=\(value)")
+        }
+
+        return headerPairs.joined(separator: "; ")
+    }
+
+    nonisolated static func decryptChromiumCookieValue(
+        encryptedHex: String,
+        hostKey: String,
+        safeStoragePassword: Data)
+        -> String?
+    {
+        guard var encrypted = data(fromHex: encryptedHex),
+              !encrypted.isEmpty
+        else {
+            return nil
+        }
+
+        if encrypted.starts(with: Data("v10".utf8)) || encrypted.starts(with: Data("v11".utf8)) {
+            encrypted.removeFirst(3)
+        }
+
+        guard let key = chromiumEncryptionKey(password: safeStoragePassword),
+              let decrypted = aes128CBCDecrypt(
+                  encrypted,
+                  key: key,
+                  iv: Data(repeating: 0x20, count: kCCBlockSizeAES128))
+        else {
+            return nil
+        }
+
+        let hostDigest = sha256(Data(hostKey.utf8))
+        let valueData = decrypted.starts(with: hostDigest)
+            ? decrypted.dropFirst(hostDigest.count)
+            : decrypted[...]
+
+        return String(data: Data(valueData), encoding: .utf8)?
+            .trimmingCharacters(in: .controlCharacters)
     }
 
     private nonisolated static func rateLimitWindow(
@@ -516,6 +729,197 @@ enum ClaudeUsageProbe {
             return trimmed.isEmpty ? nil : trimmed
         }
         return nil
+    }
+
+    private nonisolated static func chromiumCookieSources() -> [ChromiumCookieSource] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let applicationSupport = home.appendingPathComponent("Library/Application Support", isDirectory: true)
+        let browserRoots: [(label: String, relativePath: String, safeStorageService: String)] = [
+            ("Chrome", "Google/Chrome", "Chrome Safe Storage"),
+            ("Microsoft Edge", "Microsoft Edge", "Microsoft Edge Safe Storage"),
+            ("Brave", "BraveSoftware/Brave-Browser", "Brave Safe Storage"),
+            ("Arc", "Arc/User Data", "Arc Safe Storage"),
+        ]
+
+        var sources: [ChromiumCookieSource] = []
+        var seen = Set<String>()
+        for browser in browserRoots {
+            let root = applicationSupport.appendingPathComponent(browser.relativePath, isDirectory: true)
+            guard let profileURLs = try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles])
+            else {
+                continue
+            }
+
+            let likelyProfiles = profileURLs.filter { url in
+                let name = url.lastPathComponent
+                return name == "Default" || name.hasPrefix("Profile ") || name == "Guest Profile"
+            }
+            for profile in likelyProfiles {
+                for relativeCookiePath in ["Network/Cookies", "Cookies"] {
+                    let cookieURL = profile.appendingPathComponent(relativeCookiePath, isDirectory: false)
+                    guard FileManager.default.fileExists(atPath: cookieURL.path),
+                          seen.insert(cookieURL.path).inserted
+                    else {
+                        continue
+                    }
+                    sources.append(ChromiumCookieSource(
+                        label: "\(browser.label) \(profile.lastPathComponent)",
+                        cookieDatabaseURL: cookieURL,
+                        safeStorageService: browser.safeStorageService))
+                }
+            }
+        }
+        return sources
+    }
+
+    private nonisolated static func chromiumCookieRows(in databaseURL: URL) throws -> [ChromiumCookieRow] {
+        let query = """
+        SELECT host_key || char(31) || name || char(31) || value || char(31) || hex(encrypted_value)
+        FROM cookies
+        WHERE host_key IN ('claude.ai', '.claude.ai')
+        ORDER BY expires_utc DESC
+        """
+
+        let result = try CommandRunner.run(
+            executable: "/usr/bin/sqlite3",
+            arguments: ["-batch", "-readonly", databaseURL.path, query],
+            timeout: 3)
+
+        return result.stdout
+            .components(separatedBy: .newlines)
+            .compactMap { line -> ChromiumCookieRow? in
+                let parts = line.components(separatedBy: String(UnicodeScalar(31)!))
+                guard parts.count == 4 else { return nil }
+                return ChromiumCookieRow(
+                    hostKey: parts[0],
+                    name: parts[1],
+                    value: parts[2],
+                    encryptedValueHex: parts[3])
+            }
+    }
+
+    private nonisolated static func chromiumEncryptionKey(password: Data) -> Data? {
+        let salt = Data("saltysalt".utf8)
+        var key = Data(repeating: 0, count: kCCKeySizeAES128)
+        let keyCount = key.count
+        let passwordCount = password.count
+        let saltCount = salt.count
+        let status = key.withUnsafeMutableBytes { keyPointer in
+            password.withUnsafeBytes { passwordPointer in
+                salt.withUnsafeBytes { saltPointer in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passwordPointer.bindMemory(to: Int8.self).baseAddress,
+                        passwordCount,
+                        saltPointer.bindMemory(to: UInt8.self).baseAddress,
+                        saltCount,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
+                        1_003,
+                        keyPointer.bindMemory(to: UInt8.self).baseAddress,
+                        keyCount)
+                }
+            }
+        }
+        return status == kCCSuccess ? key : nil
+    }
+
+    private nonisolated static func aes128CBCDecrypt(
+        _ data: Data,
+        key: Data,
+        iv: Data)
+        -> Data?
+    {
+        var output = Data(repeating: 0, count: data.count + kCCBlockSizeAES128)
+        var outputLength: size_t = 0
+        let dataCount = data.count
+        let keyCount = key.count
+        let outputCapacity = output.count
+
+        let status = output.withUnsafeMutableBytes { outputPointer in
+            data.withUnsafeBytes { dataPointer in
+                key.withUnsafeBytes { keyPointer in
+                    iv.withUnsafeBytes { ivPointer in
+                        CCCrypt(
+                            CCOperation(kCCDecrypt),
+                            CCAlgorithm(kCCAlgorithmAES),
+                            CCOptions(kCCOptionPKCS7Padding),
+                            keyPointer.baseAddress,
+                            keyCount,
+                            ivPointer.baseAddress,
+                            dataPointer.baseAddress,
+                            dataCount,
+                            outputPointer.baseAddress,
+                            outputCapacity,
+                            &outputLength)
+                    }
+                }
+            }
+        }
+
+        guard status == kCCSuccess else { return nil }
+        output.removeSubrange(outputLength..<output.count)
+        return output
+    }
+
+    private nonisolated static func sha256(_ data: Data) -> Data {
+        var digest = Data(repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        digest.withUnsafeMutableBytes { digestPointer in
+            data.withUnsafeBytes { dataPointer in
+                _ = CC_SHA256(dataPointer.baseAddress, CC_LONG(data.count), digestPointer.bindMemory(to: UInt8.self).baseAddress)
+            }
+        }
+        return digest
+    }
+
+    private nonisolated static func data(fromHex hex: String) -> Data? {
+        let trimmed = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count.isMultiple(of: 2) else { return nil }
+
+        var data = Data()
+        data.reserveCapacity(trimmed.count / 2)
+        var index = trimmed.startIndex
+        while index < trimmed.endIndex {
+            let next = trimmed.index(index, offsetBy: 2)
+            guard let byte = UInt8(trimmed[index..<next], radix: 16) else {
+                return nil
+            }
+            data.append(byte)
+            index = next
+        }
+        return data
+    }
+}
+
+struct ChromiumCookieRow: Equatable, Sendable {
+    var hostKey: String
+    var name: String
+    var value: String
+    var encryptedValueHex: String
+}
+
+private struct ChromiumCookieSource: Sendable {
+    var label: String
+    var cookieDatabaseURL: URL
+    var safeStorageService: String
+}
+
+private struct ClaudeWebOrganization: Decodable, Sendable {
+    var uuid: String
+    var name: String?
+    var capabilities: [String]?
+
+    nonisolated var id: String { uuid }
+
+    nonisolated var hasChatCapability: Bool {
+        Set((capabilities ?? []).map { $0.lowercased() }).contains("chat")
+    }
+
+    nonisolated var isAPIOnly: Bool {
+        let normalized = Set((capabilities ?? []).map { $0.lowercased() })
+        return !normalized.isEmpty && normalized == ["api"]
     }
 }
 
@@ -814,6 +1218,7 @@ enum ClaudeUsageProbeError: Error, LocalizedError, Equatable {
     case httpStatus(Int, retryAfter: TimeInterval?)
     case missingSessionUsage
     case claudeCLINotFound
+    case webUsageFailed(String)
     case cliUsageFailed(String)
 
     nonisolated var errorDescription: String? {
@@ -826,6 +1231,8 @@ enum ClaudeUsageProbeError: Error, LocalizedError, Equatable {
             return "Claude usage response did not include session usage."
         case .claudeCLINotFound:
             return "Claude CLI was not found in PATH."
+        case let .webUsageFailed(message):
+            return message
         case let .cliUsageFailed(message):
             return message
         }
