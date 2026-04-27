@@ -53,11 +53,11 @@ final class StatusItemController: NSObject {
 
         let snapshot = store.primarySnapshot
         let symbol = snapshot.state.isReady ? "chart.bar.xaxis" : "exclamationmark.triangle"
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: snapshot.provider.displayName)
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "CodeBar Pro")
         image?.isTemplate = true
         button.image = image
-        button.title = store.preferences.showUsedInMenuBar ? " \(snapshot.primary.formattedValue)" : " \(snapshot.provider.displayName)"
-        button.toolTip = "\(snapshot.provider.displayName): \(snapshot.state.title)"
+        button.title = store.preferences.showUsedInMenuBar ? " \(snapshot.primary.formattedValue)" : " CodeBar Pro"
+        button.toolTip = "CodeBar Pro - \(snapshot.provider.displayName): \(snapshot.state.title)"
     }
 
     @objc private func togglePopover(_ sender: NSStatusBarButton) {
