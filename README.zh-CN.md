@@ -15,13 +15,13 @@ CodeBar Pro 是一个精致的原生 macOS 菜单栏应用，用来查看本机 
 
 - 🧭 **菜单栏优先** - 安静地常驻 macOS 菜单栏，不显示 Dock 图标。
 - 📊 **快速用量概览** - 展示每个 provider 的今日用量和最近 30 天用量。
-- 📈 **Codex quota 百分比** - 当日志里有 rate limit 数据时，展示 Codex 5 小时和 weekly 使用百分比。
+- 📈 **Quota 百分比** - 可展示 Codex 5 小时/weekly 百分比，以及 Claude Code session/weekly 百分比。
 - 🔢 **优先展示 token** - 如果日志里存在 token 计数就展示 token，否则回退到事件数。
 - 🧩 **多 provider 支持** - 支持 Codex 和 Claude Code 活动数据。
 - 🔍 **本机 CLI 检测** - 检查命令行工具是否可用，并展示版本信息。
 - 🕒 **灵活刷新** - 支持手动刷新和自动刷新间隔。
 - 🎛️ **独立开关** - 每个 provider 都可以单独启用或禁用。
-- 🛡️ **本地优先隐私** - 只扫描本机文件，不上传用量数据。
+- 🛡️ **本地优先隐私** - 默认扫描本机文件，仅在支持 quota 百分比时访问 provider usage endpoint。
 - ⚙️ **原生实现** - 使用 AppKit 状态栏、SwiftUI 界面，不是网页壳。
 
 ## 🖥️ 你会看到什么
@@ -39,6 +39,7 @@ CodeBar Pro 主要由三部分组成：
 - macOS 14.0 或更高版本。
 - Xcode 16 或更高版本。
 - 可选：安装 `codex` 或 `claude` CLI，用于版本检测。
+- 可选：Keychain 或 `~/.claude/.credentials.json` 中存在 Claude Code OAuth 凭据，用于 Claude Code quota 百分比。
 - 本机存在可读取的 provider 活动日志：
   - `~/.codex`
   - `~/.claude/projects`
@@ -103,7 +104,8 @@ CodeBar Pro 的本地数据流程很小：
 5. 优先扫描最近的日志。
 6. 解析每条 JSONL 记录，并按记录时间戳统计用量。
 7. 如果存在 Codex rate limit 数据，则提取使用百分比。
-8. 把 provider 快照发布回菜单栏界面。
+8. 如果存在 Claude Code OAuth 凭据，则获取 Claude Code usage 百分比。
+9. 把 provider 快照发布回菜单栏界面。
 
 为了保持刷新流畅，扫描器会限制每个 provider 最多处理最近 1,500 个 JSONL 文件。
 
@@ -113,8 +115,9 @@ CodeBar Pro 围绕本地检查设计：
 
 - 读取你 Mac 上已有的本地用量日志。
 - 在本机执行 CLI 版本检测。
-- 不把使用数据发送到服务器。
-- 不需要账号、token 或网络服务。
+- 为了展示 Claude Code quota 百分比，可能读取 Keychain 或 `~/.claude/.credentials.json` 中的 Claude Code OAuth 凭据，并调用 Anthropic usage endpoint。
+- 不上传本地 JSONL 日志、prompt 或 transcript 内容。
+- 如果 Claude quota 请求失败或遇到临时 rate limit，会自动回退到本地 token 总数。
 
 如果本地 provider 日志里包含敏感 prompt 或元数据，它们仍保留在原本的磁盘位置。CodeBar Pro 只计算聚合后的数量并用于展示。
 
@@ -135,6 +138,7 @@ CodeBarPro/
 ├── CodeBarPro.xcodeproj
 ├── CodeBarPro/
 │   ├── AppPreferences.swift
+│   ├── ClaudeUsageProbe.swift
 │   ├── CodeBarProApp.swift
 │   ├── MenuBarViews.swift
 │   ├── ProviderProbe.swift
@@ -161,6 +165,10 @@ CodeBarPro/
 ### 用量看起来比预期少
 
 部分日志可能只有事件记录，没有 token 计数。这种情况下 CodeBar Pro 会展示事件数，而不是猜测 token 用量。
+
+### Claude quota 百分比不可用
+
+Claude Code quota 百分比需要可读取的 Claude Code OAuth 凭据，并且 Anthropic usage endpoint 返回成功。如果 endpoint 临时返回 HTTP 429 等错误，CodeBar Pro 会继续展示本地 token 总数，并在 Claude 卡片里显示简短说明。
 
 ### Xcode 运行后没看到应用窗口
 

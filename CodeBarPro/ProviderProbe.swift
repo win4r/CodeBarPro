@@ -34,30 +34,33 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
             return snapshot
         }
 
+        async let externalRateLimits = Self.externalRateLimits(for: provider, version: version)
         let summary = LocalUsageScanner.scan(provider: provider)
         return Self.makeSnapshot(
             provider: provider,
             enabled: enabled,
             version: version,
-            summary: summary)
+            summary: summary,
+            externalRateLimits: await externalRateLimits)
     }
 
-    private nonisolated static func makeSnapshot(
+    nonisolated static func makeSnapshot(
         provider: UsageProvider,
         enabled: Bool,
         version: String,
-        summary: LocalUsageScanner.Summary)
+        summary: LocalUsageScanner.Summary,
+        externalRateLimits: ProviderRateLimitFetchResult = .unavailable)
         -> ProviderSnapshot
     {
+        let rateLimits = externalRateLimits.rateLimits ?? (provider == .codex ? summary.rateLimits : nil)
         let primary: UsageMetric
         let secondary: UsageMetric
-        if provider == .codex,
-           let rateLimits = summary.rateLimits,
+        if let rateLimits,
            let primaryLimit = rateLimits.primary,
            let secondaryLimit = rateLimits.secondary
         {
-            primary = Self.rateLimitMetric(primaryLimit)
-            secondary = Self.rateLimitMetric(secondaryLimit)
+            primary = Self.rateLimitMetric(primaryLimit, provider: provider)
+            secondary = Self.rateLimitMetric(secondaryLimit, provider: provider)
         } else {
             primary = Self.metric(
                 title: "Today",
@@ -76,8 +79,11 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
             notes = "No local JSONL activity logs found."
         } else if summary.truncatedFileCount > 0 {
             notes = "Scanned the 1,500 most recent JSONL logs; skipped \(summary.truncatedFileCount) older logs."
-        } else if provider == .codex, summary.rateLimits != nil {
-            notes = "Tokens: today \(NumberFormat.compactInteger(summary.todayTokens)), last 30 days \(NumberFormat.compactInteger(summary.last30DaysTokens))."
+        } else if rateLimits != nil {
+            let source = externalRateLimits.source.map { " \($0)." } ?? ""
+            notes = "Tokens: today \(NumberFormat.compactInteger(summary.todayTokens)), last 30 days \(NumberFormat.compactInteger(summary.last30DaysTokens)).\(source)"
+        } else if provider == .claude, let failureReason = externalRateLimits.failureReason {
+            notes = "\(failureReason) Showing local token totals."
         } else if summary.last30DaysTokens == 0 {
             notes = "Found logs, but no token counters were detected."
         } else {
@@ -103,19 +109,23 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
         return UsageMetric(title: title, used: Double(events), limit: nil, unit: .events, resetsAt: reset)
     }
 
-    private nonisolated static func rateLimitMetric(_ window: LocalUsageScanner.RateLimitWindow) -> UsageMetric {
+    private nonisolated static func rateLimitMetric(
+        _ window: LocalUsageScanner.RateLimitWindow,
+        provider: UsageProvider)
+        -> UsageMetric
+    {
         UsageMetric(
-            title: rateLimitTitle(window.windowMinutes),
+            title: rateLimitTitle(window.windowMinutes, provider: provider),
             used: window.usedPercent,
             limit: 100,
             unit: .percent,
             resetsAt: window.resetsAt)
     }
 
-    private nonisolated static func rateLimitTitle(_ windowMinutes: Int) -> String {
+    private nonisolated static func rateLimitTitle(_ windowMinutes: Int, provider: UsageProvider) -> String {
         switch windowMinutes {
         case 300:
-            return "5h limit"
+            return provider == .claude ? "Session limit" : "5h limit"
         case 10_080:
             return "Weekly limit"
         case let minutes where minutes % 1_440 == 0:
@@ -124,6 +134,19 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
             return "\(minutes / 60)h limit"
         default:
             return "\(windowMinutes)m limit"
+        }
+    }
+
+    private nonisolated static func externalRateLimits(
+        for provider: UsageProvider,
+        version: String)
+        async -> ProviderRateLimitFetchResult
+    {
+        switch provider {
+        case .codex:
+            return .unavailable
+        case .claude:
+            return await ClaudeUsageProbe.fetchRateLimits(claudeVersion: version)
         }
     }
 }

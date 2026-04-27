@@ -80,7 +80,7 @@ struct MenuContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("CodeBar Pro")
                     .font(.headline)
-                Text(store.isRefreshing ? "Refreshing provider usage" : "Local provider activity")
+                Text(store.isRefreshing ? "Refreshing provider usage" : "Provider activity")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

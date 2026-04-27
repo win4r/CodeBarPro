@@ -97,6 +97,113 @@ struct CodeBarProTests {
         #expect(summary.rateLimits?.secondary?.windowMinutes == 10_080)
     }
 
+    @Test func claudeCredentialParserReadsNestedOAuthCredential() throws {
+        let json = """
+        {
+          "claudeAiOauth": {
+            "accessToken": "sk-ant-oat-test",
+            "refreshToken": "refresh",
+            "rateLimitTier": "claude_pro",
+            "subscriptionType": "pro"
+          }
+        }
+        """
+
+        let credential = ClaudeUsageProbe.credential(from: try #require(json.data(using: .utf8)))
+
+        #expect(credential?.accessToken == "sk-ant-oat-test")
+        #expect(credential?.rateLimitTier == "claude_pro")
+        #expect(credential?.subscriptionType == "pro")
+    }
+
+    @Test func claudeOAuthUsageMapsSessionAndWeeklyPercentages() throws {
+        let json = """
+        {
+          "five_hour": {
+            "utilization": 28.5,
+            "resets_at": "2026-04-27T02:00:00Z"
+          },
+          "seven_day": {
+            "utilization": 61,
+            "resets_at": "2026-04-30T02:00:00Z"
+          }
+        }
+        """
+
+        let usage = try ClaudeUsageProbe.decodeOAuthUsage(try #require(json.data(using: .utf8)))
+        let observedAt = try date("2026-04-27T01:00:00Z")
+        let primaryReset = try date("2026-04-27T02:00:00Z")
+        let rateLimits = try ClaudeUsageProbe.rateLimits(from: usage, observedAt: observedAt)
+
+        #expect(rateLimits.primary?.usedPercent == 28.5)
+        #expect(rateLimits.primary?.windowMinutes == 300)
+        #expect(rateLimits.primary?.resetsAt == primaryReset)
+        #expect(rateLimits.secondary?.usedPercent == 61)
+        #expect(rateLimits.secondary?.windowMinutes == 10_080)
+        #expect(rateLimits.observedAt == observedAt)
+    }
+
+    @Test func claudeSnapshotPrefersOAuthRateLimitPercentages() {
+        let summary = LocalUsageScanner.Summary(
+            todayTokens: 1_200_000,
+            last30DaysTokens: 2_500_000,
+            todayEvents: 3,
+            last30DaysEvents: 4,
+            scannedFiles: 2)
+        let externalRateLimits = ProviderRateLimitFetchResult(
+            rateLimits: LocalUsageScanner.RateLimitSnapshot(
+                primary: LocalUsageScanner.RateLimitWindow(
+                    usedPercent: 28,
+                    windowMinutes: 300,
+                    resetsAt: nil),
+                secondary: LocalUsageScanner.RateLimitWindow(
+                    usedPercent: 61,
+                    windowMinutes: 10_080,
+                    resetsAt: nil),
+                observedAt: Date()),
+            source: "Claude OAuth",
+            failureReason: nil)
+
+        let snapshot = LocalProviderProbe.makeSnapshot(
+            provider: .claude,
+            enabled: true,
+            version: "2.1.119 (Claude Code)",
+            summary: summary,
+            externalRateLimits: externalRateLimits)
+
+        #expect(snapshot.primary.title == "Session limit")
+        #expect(snapshot.primary.formattedValue == "28%")
+        #expect(snapshot.primary.percentUsed == 0.28)
+        #expect(snapshot.secondary.title == "Weekly limit")
+        #expect(snapshot.secondary.formattedValue == "61%")
+        #expect(snapshot.notes?.contains("Claude OAuth.") == true)
+    }
+
+    @Test func claudeSnapshotFallsBackToTokenTotalsWhenQuotaUnavailable() {
+        let summary = LocalUsageScanner.Summary(
+            todayTokens: 1_200,
+            last30DaysTokens: 9_800,
+            todayEvents: 1,
+            last30DaysEvents: 5,
+            scannedFiles: 2)
+        let externalRateLimits = ProviderRateLimitFetchResult(
+            rateLimits: nil,
+            source: nil,
+            failureReason: "Claude usage endpoint returned HTTP 429.")
+
+        let snapshot = LocalProviderProbe.makeSnapshot(
+            provider: .claude,
+            enabled: true,
+            version: "2.1.119 (Claude Code)",
+            summary: summary,
+            externalRateLimits: externalRateLimits)
+
+        #expect(snapshot.primary.title == "Today")
+        #expect(snapshot.primary.formattedValue == "1.2K")
+        #expect(snapshot.secondary.title == "Last 30 days")
+        #expect(snapshot.notes == "Claude usage endpoint returned HTTP 429. Showing local token totals.")
+    }
+
     @Test func percentageMetricsFormatAndProgressCorrectly() {
         let metric = UsageMetric(
             title: "5h limit",
