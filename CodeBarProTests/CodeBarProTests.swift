@@ -76,6 +76,39 @@ struct CodeBarProTests {
         #expect(NumberFormat.compactInteger(19_075_400_000) == "19.1B")
     }
 
+    @Test func codexScannerCapturesLatestRateLimitPercentages() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let now = try date("2026-04-26T15:00:00Z")
+        let file = root.appendingPathComponent("session.jsonl")
+        let jsonl = """
+        {"timestamp":"2026-04-26T12:00:00Z","payload":{"rate_limits":{"primary":{"used_percent":3,"window_minutes":300,"resets_at":1777269311},"secondary":{"used_percent":1,"window_minutes":10080,"resets_at":1777805182}},"info":{"last_token_usage":{"total_tokens":10}}}}
+        {"timestamp":"2026-04-26T12:01:00Z","payload":{"rate_limits":{"primary":{"used_percent":7,"window_minutes":300,"resets_at":1777269311},"secondary":{"used_percent":4,"window_minutes":10080,"resets_at":1777805182}},"info":{"last_token_usage":{"total_tokens":15}}}}
+        """
+
+        try #require(jsonl.data(using: .utf8)).write(to: file)
+        try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: file.path)
+
+        let summary = LocalUsageScanner.scan(roots: [root], provider: .codex, now: now)
+        #expect(summary.rateLimits?.primary?.usedPercent == 7)
+        #expect(summary.rateLimits?.primary?.windowMinutes == 300)
+        #expect(summary.rateLimits?.secondary?.usedPercent == 4)
+        #expect(summary.rateLimits?.secondary?.windowMinutes == 10_080)
+    }
+
+    @Test func percentageMetricsFormatAndProgressCorrectly() {
+        let metric = UsageMetric(
+            title: "5h limit",
+            used: 7,
+            limit: 100,
+            unit: .percent,
+            resetsAt: nil)
+
+        #expect(metric.formattedValue == "7%")
+        #expect(metric.percentUsed == 0.07)
+    }
+
     @Test func commandLocatorChecksNVMDirectories() {
         let resolved = CommandLocator.resolve("codex")
         #expect(resolved == nil || resolved?.hasSuffix("/codex") == true)

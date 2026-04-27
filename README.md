@@ -15,6 +15,7 @@ It is built for developers who want quick visibility without opening a terminal,
 
 - 🧭 **Menu bar first** - lives quietly in the macOS menu bar with no Dock icon.
 - 📊 **Fast usage overview** - shows today and last-30-days activity for each provider.
+- 📈 **Codex quota percentages** - surfaces 5-hour and weekly Codex usage percentages when rate limit data is available.
 - 🔢 **Token-aware metrics** - prefers token counters when available and falls back to event counts.
 - 🧩 **Multiple providers** - supports Codex and Claude Code activity sources.
 - 🔍 **Local CLI detection** - checks installed command-line tools and shows version details.
@@ -30,7 +31,7 @@ CodeBar Pro gives you three main surfaces:
 | Surface | Purpose |
 | --- | --- |
 | Menu bar item | Shows the active provider name or current used amount. |
-| Popover | Displays provider cards, status, today usage, last-30-days usage, and refresh controls. |
+| Popover | Displays provider cards, status, quota percentages or usage totals, and refresh controls. |
 | Settings window | Lets you configure providers, refresh cadence, and menu bar display behavior. |
 
 ## 📦 Requirements
@@ -101,7 +102,8 @@ CodeBar Pro collects data through a small local pipeline:
 4. Deduplicate discovered file paths.
 5. Scan the most recent logs first.
 6. Parse each JSONL record and bucket usage by record timestamp.
-7. Publish provider snapshots back to the menu bar UI.
+7. Extract Codex rate-limit percentages when present.
+8. Publish provider snapshots back to the menu bar UI.
 
 The scanner caps work to the most recent 1,500 JSONL files per provider to keep refreshes responsive.
 

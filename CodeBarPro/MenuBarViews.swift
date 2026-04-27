@@ -175,8 +175,14 @@ struct MetricRow: View {
     }
 
     private var valueText: String {
-        let suffix = metric.unit == .tokens ? "tokens" : "events"
-        return "\(metric.formattedValue) \(suffix)"
+        switch metric.unit {
+        case .tokens:
+            return "\(metric.formattedValue) tokens"
+        case .events:
+            return "\(metric.formattedValue) events"
+        case .percent:
+            return metric.formattedValue
+        }
     }
 }
 

@@ -84,6 +84,7 @@ struct UsageMetric: Equatable, Sendable {
     enum Unit: String, Sendable {
         case tokens
         case events
+        case percent
     }
 
     var title: String
@@ -107,6 +108,8 @@ struct UsageMetric: Equatable, Sendable {
             return NumberFormat.compactInteger(Int(used))
         case .events:
             return NumberFormat.integer(Int(used))
+        case .percent:
+            return "\(NumberFormat.decimal(used))%"
         }
     }
 }

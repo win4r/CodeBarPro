@@ -49,22 +49,35 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
         summary: LocalUsageScanner.Summary)
         -> ProviderSnapshot
     {
-        let primary = Self.metric(
-            title: "Today",
-            tokens: summary.todayTokens,
-            events: summary.todayEvents,
-            reset: Calendar.current.startOfNextDay())
-        let secondary = Self.metric(
-            title: "Last 30 days",
-            tokens: summary.last30DaysTokens,
-            events: summary.last30DaysEvents,
-            reset: nil)
+        let primary: UsageMetric
+        let secondary: UsageMetric
+        if provider == .codex,
+           let rateLimits = summary.rateLimits,
+           let primaryLimit = rateLimits.primary,
+           let secondaryLimit = rateLimits.secondary
+        {
+            primary = Self.rateLimitMetric(primaryLimit)
+            secondary = Self.rateLimitMetric(secondaryLimit)
+        } else {
+            primary = Self.metric(
+                title: "Today",
+                tokens: summary.todayTokens,
+                events: summary.todayEvents,
+                reset: Calendar.current.startOfNextDay())
+            secondary = Self.metric(
+                title: "Last 30 days",
+                tokens: summary.last30DaysTokens,
+                events: summary.last30DaysEvents,
+                reset: nil)
+        }
 
         let notes: String?
         if summary.scannedFiles == 0 {
             notes = "No local JSONL activity logs found."
         } else if summary.truncatedFileCount > 0 {
             notes = "Scanned the 1,500 most recent JSONL logs; skipped \(summary.truncatedFileCount) older logs."
+        } else if provider == .codex, summary.rateLimits != nil {
+            notes = "Tokens: today \(NumberFormat.compactInteger(summary.todayTokens)), last 30 days \(NumberFormat.compactInteger(summary.last30DaysTokens))."
         } else if summary.last30DaysTokens == 0 {
             notes = "Found logs, but no token counters were detected."
         } else {
@@ -88,6 +101,30 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
         }
 
         return UsageMetric(title: title, used: Double(events), limit: nil, unit: .events, resetsAt: reset)
+    }
+
+    private nonisolated static func rateLimitMetric(_ window: LocalUsageScanner.RateLimitWindow) -> UsageMetric {
+        UsageMetric(
+            title: rateLimitTitle(window.windowMinutes),
+            used: window.usedPercent,
+            limit: 100,
+            unit: .percent,
+            resetsAt: window.resetsAt)
+    }
+
+    private nonisolated static func rateLimitTitle(_ windowMinutes: Int) -> String {
+        switch windowMinutes {
+        case 300:
+            return "5h limit"
+        case 10_080:
+            return "Weekly limit"
+        case let minutes where minutes % 1_440 == 0:
+            return "\(minutes / 1_440)d limit"
+        case let minutes where minutes % 60 == 0:
+            return "\(minutes / 60)h limit"
+        default:
+            return "\(windowMinutes)m limit"
+        }
     }
 }
 
@@ -309,6 +346,18 @@ enum CommandLocator {
 }
 
 enum LocalUsageScanner {
+    struct RateLimitWindow: Equatable, Sendable {
+        var usedPercent: Double
+        var windowMinutes: Int
+        var resetsAt: Date?
+    }
+
+    struct RateLimitSnapshot: Equatable, Sendable {
+        var primary: RateLimitWindow?
+        var secondary: RateLimitWindow?
+        var observedAt: Date
+    }
+
     struct Summary: Equatable, Sendable {
         var todayTokens: Int = 0
         var last30DaysTokens: Int = 0
@@ -317,6 +366,7 @@ enum LocalUsageScanner {
         var scannedFiles: Int = 0
         var truncatedFileCount: Int = 0
         var lastActivity: Date?
+        var rateLimits: RateLimitSnapshot?
 
         nonisolated init(
             todayTokens: Int = 0,
@@ -325,7 +375,8 @@ enum LocalUsageScanner {
             last30DaysEvents: Int = 0,
             scannedFiles: Int = 0,
             truncatedFileCount: Int = 0,
-            lastActivity: Date? = nil)
+            lastActivity: Date? = nil,
+            rateLimits: RateLimitSnapshot? = nil)
         {
             self.todayTokens = todayTokens
             self.last30DaysTokens = last30DaysTokens
@@ -334,6 +385,7 @@ enum LocalUsageScanner {
             self.scannedFiles = scannedFiles
             self.truncatedFileCount = truncatedFileCount
             self.lastActivity = lastActivity
+            self.rateLimits = rateLimits
         }
     }
 
@@ -379,6 +431,7 @@ enum LocalUsageScanner {
             summary.todayEvents += fileSummary.todayEvents
             summary.last30DaysEvents += fileSummary.last30DaysEvents
             summary.lastActivity = latest(summary.lastActivity, fileSummary.lastActivity)
+            summary.rateLimits = latestRateLimits(summary.rateLimits, fileSummary.rateLimits)
         }
 
         return summary
@@ -523,6 +576,11 @@ enum LocalUsageScanner {
         guard let json = try? JSONSerialization.jsonObject(with: lineData) else { return }
         let eventDate = recordDate(in: json) ?? fallbackDate
         summary.lastActivity = latest(summary.lastActivity, eventDate)
+        if provider == .codex,
+           let rateLimits = rateLimitSnapshot(in: json, observedAt: eventDate)
+        {
+            summary.rateLimits = latestRateLimits(summary.rateLimits, rateLimits)
+        }
         guard eventDate <= now, eventDate >= since else { return }
 
         let tokens = provider.map { tokenTotal(in: json, provider: $0) } ?? tokenTotal(in: json)
@@ -686,10 +744,50 @@ enum LocalUsageScanner {
         return nil
     }
 
+    private nonisolated static func rateLimitSnapshot(in object: Any, observedAt: Date) -> RateLimitSnapshot? {
+        guard let dictionary = object as? [String: Any] else { return nil }
+        let payload = value(forNormalizedKey: "payload", in: dictionary) as? [String: Any]
+        let root = payload ?? dictionary
+        guard let rateLimits = value(forNormalizedKey: "ratelimits", in: root) as? [String: Any] else {
+            return nil
+        }
+
+        let primary = rateLimitWindow(in: value(forNormalizedKey: "primary", in: rateLimits))
+        let secondary = rateLimitWindow(in: value(forNormalizedKey: "secondary", in: rateLimits))
+        guard primary != nil || secondary != nil else { return nil }
+        return RateLimitSnapshot(primary: primary, secondary: secondary, observedAt: observedAt)
+    }
+
+    private nonisolated static func rateLimitWindow(in object: Any?) -> RateLimitWindow? {
+        guard let dictionary = object as? [String: Any],
+              let usedPercentValue = value(forNormalizedKey: "usedpercent", in: dictionary),
+              let usedPercent = doubleValue(usedPercentValue),
+              let windowMinutesValue = value(forNormalizedKey: "windowminutes", in: dictionary),
+              let windowMinutes = intValue(windowMinutesValue)
+        else {
+            return nil
+        }
+
+        return RateLimitWindow(
+            usedPercent: usedPercent,
+            windowMinutes: windowMinutes,
+            resetsAt: value(forNormalizedKey: "resetsat", in: dictionary).flatMap(dateValue))
+    }
+
     private nonisolated static func latest(_ lhs: Date?, _ rhs: Date?) -> Date? {
         guard let lhs else { return rhs }
         guard let rhs else { return lhs }
         return max(lhs, rhs)
+    }
+
+    private nonisolated static func latestRateLimits(
+        _ lhs: RateLimitSnapshot?,
+        _ rhs: RateLimitSnapshot?)
+        -> RateLimitSnapshot?
+    {
+        guard let lhs else { return rhs }
+        guard let rhs else { return lhs }
+        return lhs.observedAt >= rhs.observedAt ? lhs : rhs
     }
 
     private nonisolated static func intValue(for key: String, in dictionary: [String: Any]) -> Int? {
@@ -701,6 +799,13 @@ enum LocalUsageScanner {
         if let int = value as? Int { return int }
         if let double = value as? Double { return Int(double) }
         if let number = value as? NSNumber { return number.intValue }
+        return nil
+    }
+
+    private nonisolated static func doubleValue(_ value: Any?) -> Double? {
+        if let double = value as? Double { return double }
+        if let int = value as? Int { return Double(int) }
+        if let number = value as? NSNumber { return number.doubleValue }
         return nil
     }
 
@@ -757,19 +862,22 @@ enum LocalUsageScanner {
         var todayEvents: Int = 0
         var last30DaysEvents: Int = 0
         var lastActivity: Date?
+        var rateLimits: RateLimitSnapshot?
 
         nonisolated init(
             todayTokens: Int = 0,
             last30DaysTokens: Int = 0,
             todayEvents: Int = 0,
             last30DaysEvents: Int = 0,
-            lastActivity: Date? = nil)
+            lastActivity: Date? = nil,
+            rateLimits: RateLimitSnapshot? = nil)
         {
             self.todayTokens = todayTokens
             self.last30DaysTokens = last30DaysTokens
             self.todayEvents = todayEvents
             self.last30DaysEvents = last30DaysEvents
             self.lastActivity = lastActivity
+            self.rateLimits = rateLimits
         }
     }
 
