@@ -275,6 +275,28 @@ struct CodeBarProTests {
         #expect(rateLimits.secondary?.usedPercent == 25)
     }
 
+    @Test func claudeCLIUsageOutputReportsRemoteQuotaLoading() throws {
+        let output = """
+        Settings: Usage
+
+        Loading usage data...
+        What's contributing to your limits usage?
+        Approximate, based on local sessions on this machine.
+        Scanning local sessions...
+        """
+
+        var errorMessage: String?
+        do {
+            _ = try ClaudeUsageProbe.rateLimits(
+                fromCLIUsageOutput: output,
+                observedAt: try date("2026-04-27T18:00:00Z"))
+        } catch let error as ClaudeUsageProbeError {
+            errorMessage = error.errorDescription
+        }
+
+        #expect(errorMessage == "Claude CLI /usage did not return quota percentages; remote usage data stayed loading.")
+    }
+
     @Test func claudeOAuthRetryAfterBackoffExpires() throws {
         let (defaults, suiteName) = try makeUserDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }

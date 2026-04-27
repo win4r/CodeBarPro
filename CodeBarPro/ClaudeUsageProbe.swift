@@ -139,6 +139,10 @@ enum ClaudeUsageProbe {
             labelSubstrings: ["Current session"],
             context: context)
         else {
+            if usageDataStayedLoading(in: clean) {
+                throw ClaudeUsageProbeError.cliUsageFailed(
+                    "Claude CLI /usage did not return quota percentages; remote usage data stayed loading.")
+            }
             throw ClaudeUsageProbeError.cliUsageFailed("Claude CLI /usage did not include Current session.")
         }
 
@@ -466,6 +470,15 @@ enum ClaudeUsageProbe {
         return nil
     }
 
+    private nonisolated static func usageDataStayedLoading(in text: String) -> Bool {
+        let lower = text.lowercased()
+        let compact = lower.filter { !$0.isWhitespace }
+        return compact.contains("loadingusagedata")
+            && (compact.contains("whatscontributingtoyourlimitsusage")
+                || compact.contains("scanninglocalsessions")
+                || lower.contains("approximate, based on local sessions"))
+    }
+
     private nonisolated static func stripANSICodes(_ text: String) -> String {
         text
             .replacingOccurrences(
@@ -518,6 +531,12 @@ private struct LabelSearchContext {
 
 private enum ClaudePTYUsageRunner {
     private nonisolated static let command = "/usage\r"
+    private nonisolated static let launchArguments = [
+        "--setting-sources", "project",
+        "--strict-mcp-config",
+        "--mcp-config", #"{"mcpServers":{}}"#,
+        "--no-chrome",
+    ]
 
     nonisolated static func captureUsage(binary: String, timeout: TimeInterval) async throws -> String {
         try await Task.detached(priority: .utility) {
@@ -545,7 +564,7 @@ private enum ClaudePTYUsageRunner {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = []
+        process.arguments = launchArguments
         process.environment = environment()
         process.currentDirectoryURL = probeWorkingDirectoryURL()
 
@@ -571,19 +590,22 @@ private enum ClaudePTYUsageRunner {
 
         while Date().timeIntervalSince(startedAt) < timeout {
             let elapsed = Date().timeIntervalSince(startedAt)
-            if !commandSent, elapsed >= 0.7 {
-                writeString(command, to: master)
-                commandSent = true
-                lastEnterAt = Date()
-            } else if commandSent, Date().timeIntervalSince(lastEnterAt) >= 0.8 {
-                writeString("\r", to: master)
-                lastEnterAt = Date()
-            }
-
             let count = read(master, &buffer, buffer.count)
             if count > 0 {
                 output.append(buffer, count: count)
                 let text = String(decoding: output, as: UTF8.self)
+                if !commandSent, commandPromptReady(text) {
+                    Thread.sleep(forTimeInterval: 0.3)
+                    writeString(command, to: master)
+                    commandSent = true
+                    lastEnterAt = Date()
+                } else if commandSent,
+                          Date().timeIntervalSince(lastEnterAt) >= 1.0,
+                          commandInputStillFocused(text)
+                {
+                    writeString("\r", to: master)
+                    lastEnterAt = Date()
+                }
                 if looksComplete(text) || looksFailed(text) {
                     if completedAt == nil {
                         completedAt = Date()
@@ -599,6 +621,12 @@ private enum ClaudePTYUsageRunner {
 
             if !process.isRunning, commandSent {
                 break
+            }
+
+            if !commandSent, elapsed >= 8 {
+                writeString(command, to: master)
+                commandSent = true
+                lastEnterAt = Date()
             }
             usleep(50_000)
         }
@@ -631,6 +659,7 @@ private enum ClaudePTYUsageRunner {
 
     private nonisolated static func environment() -> [String: String] {
         var environment = CommandLocator.environment
+        environment.removeValue(forKey: "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
         environment["TERM"] = "xterm-256color"
         environment["COLUMNS"] = "120"
         environment["LINES"] = "40"
@@ -670,6 +699,28 @@ private enum ClaudePTYUsageRunner {
             || lower.contains("rate limited")
             || lower.contains("authentication_error")
             || lower.contains("token_expired")
+    }
+
+    private nonisolated static func commandPromptReady(_ text: String) -> Bool {
+        let normalized = normalizedTerminalText(text)
+        return text.contains("❯")
+            || normalized.contains("welcomeback")
+            || normalized.contains("forshortcuts")
+    }
+
+    private nonisolated static func commandInputStillFocused(_ text: String) -> Bool {
+        let normalized = normalizedTerminalText(text)
+        return normalized.hasSuffix("/usage")
+    }
+
+    private nonisolated static func normalizedTerminalText(_ text: String) -> String {
+        text
+            .replacingOccurrences(
+                of: #"\u001B\[[0-?]*[ -/]*[@-~]"#,
+                with: "",
+                options: .regularExpression)
+            .lowercased()
+            .filter { !$0.isWhitespace }
     }
 }
 
