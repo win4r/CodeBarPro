@@ -74,7 +74,7 @@ enum ClaudeUsageProbe {
             switch fallbackSource {
             case .cli:
                 do {
-                    let rateLimits = try await fetchCLIRateLimits(observedAt: now)
+                    let rateLimits = try await fetchCLIRateLimitsWithRetry(observedAt: now)
                     return ProviderRateLimitFetchResult(
                         rateLimits: rateLimits,
                         supplementalMetrics: await fetchWebSupplementalMetrics(),
@@ -322,6 +322,13 @@ enum ClaudeUsageProbe {
     }
 
     private nonisolated static func keychainGenericPasswordData(service: String) -> Data? {
+        if let data = keychainPasswordViaSecurityFramework(service: service) {
+            return data
+        }
+        return keychainPasswordViaSecurityCLI(service: service)
+    }
+
+    private nonisolated static func keychainPasswordViaSecurityFramework(service: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -335,6 +342,65 @@ enum ClaudeUsageProbe {
             return nil
         }
         return data
+    }
+
+    nonisolated static func keychainPasswordViaSecurityCLI(
+        service: String,
+        timeout: TimeInterval = 1.5)
+        -> Data?
+    {
+        let binary = "/usr/bin/security"
+        guard FileManager.default.isExecutableFile(atPath: binary) else { return nil }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.standardInput = nil
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        let pid = process.processIdentifier
+        _ = setpgid(pid, pid)
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+
+        if process.isRunning {
+            process.terminate()
+            kill(-pid, SIGTERM)
+            let killDeadline = Date().addingTimeInterval(0.4)
+            while process.isRunning, Date() < killDeadline {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            if process.isRunning {
+                kill(-pid, SIGKILL)
+                kill(pid, SIGKILL)
+            }
+            _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            return nil
+        }
+
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else { return nil }
+
+        var sanitized = stdoutData
+        while let last = sanitized.last, last == 0x0A || last == 0x0D {
+            sanitized.removeLast()
+        }
+        return sanitized.isEmpty ? nil : sanitized
     }
 
     private nonisolated static func fileCredential() -> ClaudeOAuthCredential? {
@@ -507,6 +573,17 @@ enum ClaudeUsageProbe {
 
         let output = try await ClaudePTYUsageRunner.captureUsage(binary: claudeBinary, timeout: timeout)
         return try rateLimits(fromCLIUsageOutput: output, observedAt: observedAt)
+    }
+
+    private nonisolated static func fetchCLIRateLimitsWithRetry(
+        observedAt: Date)
+        async throws -> LocalUsageScanner.RateLimitSnapshot
+    {
+        do {
+            return try await fetchCLIRateLimits(observedAt: observedAt, timeout: 10)
+        } catch {
+            return try await fetchCLIRateLimits(observedAt: observedAt, timeout: 24)
+        }
     }
 
     nonisolated static func claudeWebCookieHeader() throws -> String {
@@ -980,7 +1057,7 @@ enum ClaudeUsageProbe {
 
     private nonisolated static func chromiumCookieRows(in databaseURL: URL) throws -> [ChromiumCookieRow] {
         let query = """
-        SELECT host_key || char(31) || name || char(31) || value || char(31) || hex(encrypted_value)
+        SELECT hex(host_key), hex(name), hex(value), hex(encrypted_value)
         FROM cookies
         WHERE host_key IN ('claude.ai', '.claude.ai')
         ORDER BY expires_utc DESC
@@ -988,20 +1065,36 @@ enum ClaudeUsageProbe {
 
         let result = try CommandRunner.run(
             executable: "/usr/bin/sqlite3",
-            arguments: ["-batch", "-readonly", databaseURL.path, query],
+            arguments: ["-batch", "-readonly", "-separator", "|", databaseURL.path, query],
             timeout: 3)
 
-        return result.stdout
+        return parseChromiumCookieRows(stdout: result.stdout)
+    }
+
+    nonisolated static func parseChromiumCookieRows(stdout: String) -> [ChromiumCookieRow] {
+        stdout
             .components(separatedBy: .newlines)
             .compactMap { line -> ChromiumCookieRow? in
-                let parts = line.components(separatedBy: String(UnicodeScalar(31)!))
+                let parts = line.components(separatedBy: "|")
                 guard parts.count == 4 else { return nil }
+                guard let hostKey = decodeHexUTF8(parts[0]),
+                      let name = decodeHexUTF8(parts[1]),
+                      let value = decodeHexUTF8(parts[2])
+                else {
+                    return nil
+                }
                 return ChromiumCookieRow(
-                    hostKey: parts[0],
-                    name: parts[1],
-                    value: parts[2],
+                    hostKey: hostKey,
+                    name: name,
+                    value: value,
                     encryptedValueHex: parts[3])
             }
+    }
+
+    private nonisolated static func decodeHexUTF8(_ hex: String) -> String? {
+        guard let data = data(fromHex: hex) else { return nil }
+        if data.isEmpty { return "" }
+        return String(data: data, encoding: .utf8)
     }
 
     private nonisolated static func chromiumEncryptionKey(password: Data) -> Data? {

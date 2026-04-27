@@ -585,6 +585,62 @@ struct CodeBarProTests {
         #expect(resolved == nil || resolved?.hasSuffix("/codex") == true)
     }
 
+    @Test func chromiumCookieParserDecodesHexPipeFormat() {
+        // Hex-encoded values from sqlite3 with `-separator |` and `hex(col)` for every column.
+        // Row 1: host=.claude.ai, name=sessionKey, value="" (Chrome encrypts), encrypted_value 4 bytes.
+        // Row 2: host=claude.ai, name=cf_clearance, value="plain", encrypted_value empty.
+        let host1 = ".claude.ai".utf8.map { String(format: "%02X", $0) }.joined()
+        let name1 = "sessionKey".utf8.map { String(format: "%02X", $0) }.joined()
+        let host2 = "claude.ai".utf8.map { String(format: "%02X", $0) }.joined()
+        let name2 = "cf_clearance".utf8.map { String(format: "%02X", $0) }.joined()
+        let value2 = "plain".utf8.map { String(format: "%02X", $0) }.joined()
+        let stdout = """
+        \(host1)|\(name1)||DEADBEEF
+        \(host2)|\(name2)|\(value2)|
+        """
+
+        let rows = ClaudeUsageProbe.parseChromiumCookieRows(stdout: stdout)
+
+        #expect(rows.count == 2)
+        #expect(rows[0].hostKey == ".claude.ai")
+        #expect(rows[0].name == "sessionKey")
+        #expect(rows[0].value == "")
+        #expect(rows[0].encryptedValueHex == "DEADBEEF")
+        #expect(rows[1].hostKey == "claude.ai")
+        #expect(rows[1].name == "cf_clearance")
+        #expect(rows[1].value == "plain")
+        #expect(rows[1].encryptedValueHex == "")
+    }
+
+    @Test func chromiumCookieParserSkipsMalformedLines() {
+        // The legacy unit-separator format (now broken by sqlite3 3.51 caret notation)
+        // produces lines without `|` — must be rejected, not silently parsed.
+        let stdout = """
+        claude.ai^_sessionKey^_^_DEADBEEF
+        notenoughpipes|onlytwo
+        """
+
+        let rows = ClaudeUsageProbe.parseChromiumCookieRows(stdout: stdout)
+        #expect(rows.isEmpty)
+    }
+
+    @Test func keychainSecurityCLIReturnsNilForUnknownService() {
+        let unique = "CodeBarProNonexistentService-\(UUID().uuidString)"
+        let result = ClaudeUsageProbe.keychainPasswordViaSecurityCLI(service: unique, timeout: 1.5)
+        #expect(result == nil)
+    }
+
+    @Test func keychainSecurityCLIRespectsTimeout() throws {
+        // Use an invalid service so /usr/bin/security exits quickly with nonzero;
+        // confirms the call path completes within the bounded timeout window.
+        let started = Date()
+        _ = ClaudeUsageProbe.keychainPasswordViaSecurityCLI(
+            service: "CodeBarProTimeoutProbe-\(UUID().uuidString)",
+            timeout: 1.5)
+        let elapsed = Date().timeIntervalSince(started)
+        #expect(elapsed < 3.0)
+    }
+
     @Test func commandRunnerTimesOutBlockedProcesses() throws {
         var didTimeOut = false
 
