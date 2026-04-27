@@ -167,8 +167,10 @@ struct MetricRow: View {
                     .foregroundStyle(.secondary)
             }
 
-            ProgressView(value: metric.percentUsed ?? 0, total: 1)
-                .tint(metric.percentUsed == nil ? .secondary : .blue)
+            if let percentUsed = metric.percentUsed {
+                ProgressView(value: percentUsed, total: 1)
+                    .tint(.blue)
+            }
         }
     }
 

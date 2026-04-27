@@ -35,6 +35,47 @@ struct CodeBarProTests {
         #expect(LocalUsageScanner.tokenTotal(in: object) == 100)
     }
 
+    @Test func codexScannerUsesLastTokenUsageInsteadOfRunningTotal() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let now = try date("2026-04-26T15:00:00Z")
+        let file = root.appendingPathComponent("session.jsonl")
+        let jsonl = """
+        {"timestamp":"2026-04-26T12:00:00Z","payload":{"info":{"total_token_usage":{"total_tokens":1000},"last_token_usage":{"total_tokens":10}}}}
+        {"timestamp":"2026-04-26T12:01:00Z","payload":{"info":{"total_token_usage":{"total_tokens":1015},"last_token_usage":{"input_tokens":5,"output_tokens":10}}}}
+        """
+
+        try #require(jsonl.data(using: .utf8)).write(to: file)
+        try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: file.path)
+
+        let summary = LocalUsageScanner.scan(roots: [root], provider: .codex, now: now)
+        #expect(summary.todayTokens == 25)
+        #expect(summary.last30DaysTokens == 25)
+    }
+
+    @Test func claudeScannerUsesMessageUsageOnly() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let now = try date("2026-04-26T15:00:00Z")
+        let file = root.appendingPathComponent("session.jsonl")
+        let jsonl = """
+        {"timestamp":"2026-04-26T12:00:00Z","message":{"usage":{"input_tokens":3,"output_tokens":7}},"toolUseResult":{"totalTokens":999}}
+        """
+
+        try #require(jsonl.data(using: .utf8)).write(to: file)
+        try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: file.path)
+
+        let summary = LocalUsageScanner.scan(roots: [root], provider: .claude, now: now)
+        #expect(summary.todayTokens == 10)
+        #expect(summary.last30DaysTokens == 10)
+    }
+
+    @Test func numberFormatUsesBillionsForLargeValues() {
+        #expect(NumberFormat.compactInteger(19_075_400_000) == "19.1B")
+    }
+
     @Test func commandLocatorChecksNVMDirectories() {
         let resolved = CommandLocator.resolve("codex")
         #expect(resolved == nil || resolved?.hasSuffix("/codex") == true)

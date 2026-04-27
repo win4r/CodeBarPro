@@ -339,21 +339,36 @@ enum LocalUsageScanner {
 
     nonisolated static func scan(provider: UsageProvider, now: Date = Date()) -> Summary {
         let roots = logRoots(for: provider)
-        return scan(roots: roots, now: now)
+        return scan(roots: roots, provider: provider, now: now)
     }
 
     nonisolated static func scan(roots: [URL], now: Date = Date()) -> Summary {
+        scan(roots: roots, tokenProvider: nil, now: now)
+    }
+
+    nonisolated static func scan(roots: [URL], provider: UsageProvider, now: Date = Date()) -> Summary {
+        scan(roots: roots, tokenProvider: provider, now: now)
+    }
+
+    private nonisolated static func scan(
+        roots: [URL],
+        tokenProvider: UsageProvider?,
+        now: Date)
+        -> Summary
+    {
         let calendar = Calendar.current
         let since = calendar.date(byAdding: .day, value: -29, to: now) ?? now
         let searchResult = jsonlFiles(under: roots, modifiedAfter: since)
         var summary = Summary()
         summary.truncatedFileCount = searchResult.truncatedCount
+        let cacheScope = tokenProvider?.rawValue ?? "generic"
 
         for file in searchResult.files {
             summary.scannedFiles += 1
-            let fileSummary = summaryCache.summary(for: file) {
+            let fileSummary = summaryCache.summary(for: file, scope: cacheScope) {
                 summarize(
                     file.url,
+                    provider: tokenProvider,
                     fallbackDate: file.modifiedAt,
                     calendar: calendar,
                     since: since,
@@ -367,6 +382,15 @@ enum LocalUsageScanner {
         }
 
         return summary
+    }
+
+    nonisolated static func tokenTotal(in object: Any, provider: UsageProvider) -> Int {
+        switch provider {
+        case .codex:
+            return codexTokenTotal(in: object)
+        case .claude:
+            return claudeTokenTotal(in: object)
+        }
     }
 
     nonisolated static func tokenTotal(in object: Any) -> Int {
@@ -400,6 +424,28 @@ enum LocalUsageScanner {
         return 0
     }
 
+    private nonisolated static func codexTokenTotal(in object: Any) -> Int {
+        guard let dictionary = object as? [String: Any],
+              let payload = value(forNormalizedKey: "payload", in: dictionary) as? [String: Any],
+              let info = value(forNormalizedKey: "info", in: payload) as? [String: Any],
+              let lastUsage = value(forNormalizedKey: "lasttokenusage", in: info)
+        else {
+            return 0
+        }
+
+        return tokenTotal(in: lastUsage)
+    }
+
+    private nonisolated static func claudeTokenTotal(in object: Any) -> Int {
+        guard let dictionary = object as? [String: Any],
+              let usage = preferredUsageObject(in: dictionary)
+        else {
+            return 0
+        }
+
+        return tokenTotal(in: usage)
+    }
+
     private nonisolated static func logRoots(for provider: UsageProvider) -> [URL] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         switch provider {
@@ -416,6 +462,7 @@ enum LocalUsageScanner {
 
     private nonisolated static func summarize(
         _ url: URL,
+        provider: UsageProvider?,
         fallbackDate: Date,
         calendar: Calendar,
         since: Date,
@@ -438,6 +485,7 @@ enum LocalUsageScanner {
                 if byte == newline || byte == carriageReturn {
                     processLine(
                         lineData,
+                        provider: provider,
                         summary: &summary,
                         fallbackDate: fallbackDate,
                         calendar: calendar,
@@ -452,6 +500,7 @@ enum LocalUsageScanner {
 
         processLine(
             lineData,
+            provider: provider,
             summary: &summary,
             fallbackDate: fallbackDate,
             calendar: calendar,
@@ -463,6 +512,7 @@ enum LocalUsageScanner {
 
     private nonisolated static func processLine(
         _ lineData: Data,
+        provider: UsageProvider?,
         summary: inout FileSummary,
         fallbackDate: Date,
         calendar: Calendar,
@@ -475,7 +525,7 @@ enum LocalUsageScanner {
         summary.lastActivity = latest(summary.lastActivity, eventDate)
         guard eventDate <= now, eventDate >= since else { return }
 
-        let tokens = tokenTotal(in: json)
+        let tokens = provider.map { tokenTotal(in: json, provider: $0) } ?? tokenTotal(in: json)
         summary.last30DaysTokens += tokens
         summary.last30DaysEvents += 1
 
@@ -665,6 +715,8 @@ enum LocalUsageScanner {
         "cachereadinputtokens",
         "cachecreationtokens",
         "cachereadtokens",
+        "cachedinputtokens",
+        "reasoningoutputtokens",
     ]
 
     private nonisolated static let usageKeys: [String] = [
@@ -736,8 +788,9 @@ enum LocalUsageScanner {
         private let lock = NSLock()
         nonisolated(unsafe) private var summaries: [String: CachedFileSummary] = [:]
 
-        nonisolated func summary(for file: ScannedFile, load: () -> FileSummary) -> FileSummary {
-            let key = file.url.standardizedFileURL.resolvingSymlinksInPath().path
+        nonisolated func summary(for file: ScannedFile, scope: String, load: () -> FileSummary) -> FileSummary {
+            let path = file.url.standardizedFileURL.resolvingSymlinksInPath().path
+            let key = "\(scope):\(path)"
 
             lock.lock()
             if let cached = summaries[key],
