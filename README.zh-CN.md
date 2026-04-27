@@ -11,6 +11,10 @@ CodeBar Pro 是一个精致的原生 macOS 菜单栏应用，用来查看本机 
 
 它适合希望快速了解使用情况的开发者：不用打开终端，不用手动翻 JSONL 文件，也不用切到 dashboard。
 
+<p align="center">
+  <img src="docs/screenshots/popover.png" alt="CodeBar Pro 弹出面板，显示 Codex 与 Claude Code 用量" width="380">
+</p>
+
 ## ✨ 亮点
 
 - 🧭 **菜单栏优先** - 安静地常驻 macOS 菜单栏，不显示 Dock 图标。

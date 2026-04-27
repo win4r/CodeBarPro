@@ -11,6 +11,10 @@ CodeBar Pro is a polished native macOS menu bar app for keeping an eye on local 
 
 It is built for developers who want quick visibility without opening a terminal, digging through JSONL files, or switching into a dashboard.
 
+<p align="center">
+  <img src="docs/screenshots/popover.png" alt="CodeBar Pro popover showing Codex and Claude Code usage" width="380">
+</p>
+
 ## ✨ Highlights
 
 - 🧭 **Menu bar first** - lives quietly in the macOS menu bar with no Dock icon.
