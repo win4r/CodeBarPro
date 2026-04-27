@@ -193,6 +193,10 @@ enum ClaudeUsageProbe {
         let hasWeeklyLabel = context.contains("currentweek")
         let hasModelSpecificLabel = context.contains("currentweekopus")
             || context.contains("currentweeksonnet")
+        if primaryUsed == nil, usageDataStayedLoading(in: clean) {
+            throw ClaudeUsageProbeError.cliUsageFailed(
+                "Claude CLI /usage did not return quota percentages; remote usage data stayed loading.")
+        }
         if primaryUsed == nil
             || (hasWeeklyLabel && secondaryUsed == nil)
             || (hasModelSpecificLabel && modelSpecificUsed == nil)
@@ -209,10 +213,6 @@ enum ClaudeUsageProbe {
         }
 
         guard let primaryUsed else {
-            if usageDataStayedLoading(in: clean) {
-                throw ClaudeUsageProbeError.cliUsageFailed(
-                    "Claude CLI /usage did not return quota percentages; remote usage data stayed loading.")
-            }
             throw ClaudeUsageProbeError.cliUsageFailed("Claude CLI /usage did not include Current session.")
         }
 
@@ -777,13 +777,20 @@ enum ClaudeUsageProbe {
             if let value = percentUsed(from: line) {
                 return value
             }
-            guard !isLikelyStatusContextLine(line),
-                  let rawPercent = firstPercent(in: line)
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isBarePercentageLine(trimmed),
+                  let rawPercent = firstPercent(in: trimmed)
             else {
                 return nil
             }
             return max(0, min(100, rawPercent))
         }
+    }
+
+    private nonisolated static func isBarePercentageLine(_ trimmed: String) -> Bool {
+        guard !trimmed.isEmpty else { return false }
+        let pattern = #"^[0-9]{1,3}(?:\.[0-9]+)?\p{Zs}*%$"#
+        return trimmed.range(of: pattern, options: .regularExpression) != nil
     }
 
     private nonisolated static func canInferUnlabeledQuotaWindows(in text: String) -> Bool {

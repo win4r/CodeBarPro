@@ -496,6 +496,40 @@ struct CodeBarProTests {
         #expect(errorMessage == "Claude CLI /usage did not return quota percentages; remote usage data stayed loading.")
     }
 
+    @Test func claudeCLIUsageOutputDoesNotMisreadContextStatsWhileLoading() throws {
+        let output = """
+        Settings: Usage Stats
+
+        Session
+        Total cost: $0.0000
+        Total duration (API): 0s
+        Usage: 0 input, 0 output, 0 cache read, 0 cache write
+
+        Loading usage data…
+
+        What's contributing to your limits usage?
+        Approximate, based on local sessions on this machine — does not include other devices or claude.ai
+
+        Scanning local sessions…
+
+        Last 24h· these are independent characteristics of your usage, not a breakdown
+        14% of your usage was at >150k context
+        Longer sessions are more expensive even when cached. /compact mid-task, /clear when switching to new tasks.
+        d to day · w to week
+        """
+
+        var errorMessage: String?
+        do {
+            _ = try ClaudeUsageProbe.rateLimits(
+                fromCLIUsageOutput: output,
+                observedAt: try date("2026-04-27T18:00:00Z"))
+        } catch let error as ClaudeUsageProbeError {
+            errorMessage = error.errorDescription
+        }
+
+        #expect(errorMessage == "Claude CLI /usage did not return quota percentages; remote usage data stayed loading.")
+    }
+
     @Test func claudeWebCookieHeaderIncludesFullCookieSet() {
         let rows = [
             ChromiumCookieRow(
