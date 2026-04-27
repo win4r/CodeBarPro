@@ -179,6 +179,38 @@ struct CodeBarProTests {
         #expect(snapshot.notes?.contains("Claude OAuth.") == true)
     }
 
+    @Test func claudeSnapshotUsesSessionPercentageWhenWeeklyUnavailable() {
+        let summary = LocalUsageScanner.Summary(
+            todayTokens: 1_200,
+            last30DaysTokens: 9_800,
+            todayEvents: 1,
+            last30DaysEvents: 5,
+            scannedFiles: 2)
+        let externalRateLimits = ProviderRateLimitFetchResult(
+            rateLimits: LocalUsageScanner.RateLimitSnapshot(
+                primary: LocalUsageScanner.RateLimitWindow(
+                    usedPercent: 12,
+                    windowMinutes: 300,
+                    resetsAt: nil),
+                secondary: nil,
+                observedAt: Date()),
+            source: "Claude CLI /usage",
+            failureReason: nil)
+
+        let snapshot = LocalProviderProbe.makeSnapshot(
+            provider: .claude,
+            enabled: true,
+            version: "2.1.119 (Claude Code)",
+            summary: summary,
+            externalRateLimits: externalRateLimits)
+
+        #expect(snapshot.primary.title == "Session limit")
+        #expect(snapshot.primary.formattedValue == "12%")
+        #expect(snapshot.secondary.title == "Last 30 days")
+        #expect(snapshot.secondary.formattedValue == "9.8K")
+        #expect(snapshot.notes?.contains("Claude CLI /usage.") == true)
+    }
+
     @Test func claudeSnapshotFallsBackToTokenTotalsWhenQuotaUnavailable() {
         let summary = LocalUsageScanner.Summary(
             todayTokens: 1_200,
@@ -202,6 +234,59 @@ struct CodeBarProTests {
         #expect(snapshot.primary.formattedValue == "1.2K")
         #expect(snapshot.secondary.title == "Last 30 days")
         #expect(snapshot.notes == "Claude usage endpoint returned HTTP 429. Showing local token totals.")
+    }
+
+    @Test func claudeCLIUsageOutputMapsRemainingPercentages() throws {
+        let output = """
+        Settings: Usage
+
+        Current session
+        92% remaining
+        Resets at 7:30 PM
+
+        Current week (all models)
+        64% left
+        Resets Apr 30 at 10:00 AM
+        """
+        let observedAt = try date("2026-04-27T18:00:00Z")
+
+        let rateLimits = try ClaudeUsageProbe.rateLimits(fromCLIUsageOutput: output, observedAt: observedAt)
+
+        #expect(rateLimits.primary?.usedPercent == 8)
+        #expect(rateLimits.primary?.windowMinutes == 300)
+        #expect(rateLimits.secondary?.usedPercent == 36)
+        #expect(rateLimits.secondary?.windowMinutes == 10_080)
+    }
+
+    @Test func claudeCLIUsageOutputMapsUsedPercentages() throws {
+        let output = """
+        Current session
+        11.5% used
+
+        Current week
+        25% consumed
+        """
+
+        let rateLimits = try ClaudeUsageProbe.rateLimits(
+            fromCLIUsageOutput: output,
+            observedAt: try date("2026-04-27T18:00:00Z"))
+
+        #expect(rateLimits.primary?.usedPercent == 11.5)
+        #expect(rateLimits.secondary?.usedPercent == 25)
+    }
+
+    @Test func claudeOAuthRetryAfterBackoffExpires() throws {
+        let (defaults, suiteName) = try makeUserDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let now = try date("2026-04-27T18:00:00Z")
+        ClaudeUsageProbe.recordOAuthBackoff(retryAfter: 120, now: now, userDefaults: defaults)
+
+        #expect(ClaudeUsageProbe.retryAfterSeconds(from: "120", now: now) == 120)
+        #expect(ClaudeUsageProbe.oauthBackoffUntil(now: now, userDefaults: defaults) == now.addingTimeInterval(120))
+        #expect(ClaudeUsageProbe.oauthBackoffUntil(
+            now: now.addingTimeInterval(121),
+            userDefaults: defaults) == nil)
     }
 
     @Test func percentageMetricsFormatAndProgressCorrectly() {

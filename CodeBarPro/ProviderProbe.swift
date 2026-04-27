@@ -55,31 +55,33 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
         let rateLimits = externalRateLimits.rateLimits ?? (provider == .codex ? summary.rateLimits : nil)
         let primary: UsageMetric
         let secondary: UsageMetric
-        if let rateLimits,
-           let primaryLimit = rateLimits.primary,
-           let secondaryLimit = rateLimits.secondary
-        {
+        if let primaryLimit = rateLimits?.primary {
             primary = Self.rateLimitMetric(primaryLimit, provider: provider)
-            secondary = Self.rateLimitMetric(secondaryLimit, provider: provider)
         } else {
             primary = Self.metric(
                 title: "Today",
                 tokens: summary.todayTokens,
                 events: summary.todayEvents,
                 reset: Calendar.current.startOfNextDay())
+        }
+
+        if let secondaryLimit = rateLimits?.secondary {
+            secondary = Self.rateLimitMetric(secondaryLimit, provider: provider)
+        } else {
             secondary = Self.metric(
                 title: "Last 30 days",
                 tokens: summary.last30DaysTokens,
                 events: summary.last30DaysEvents,
                 reset: nil)
         }
+        let hasRateLimitMetric = rateLimits?.primary != nil || rateLimits?.secondary != nil
 
         let notes: String?
         if summary.scannedFiles == 0 {
             notes = "No local JSONL activity logs found."
         } else if summary.truncatedFileCount > 0 {
             notes = "Scanned the 1,500 most recent JSONL logs; skipped \(summary.truncatedFileCount) older logs."
-        } else if rateLimits != nil {
+        } else if hasRateLimitMetric {
             let source = externalRateLimits.source.map { " \($0)." } ?? ""
             notes = "Tokens: today \(NumberFormat.compactInteger(summary.todayTokens)), last 30 days \(NumberFormat.compactInteger(summary.last30DaysTokens)).\(source)"
         } else if provider == .claude, let failureReason = externalRateLimits.failureReason {

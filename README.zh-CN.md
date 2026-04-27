@@ -105,7 +105,8 @@ CodeBar Pro 的本地数据流程很小：
 6. 解析每条 JSONL 记录，并按记录时间戳统计用量。
 7. 如果存在 Codex rate limit 数据，则提取使用百分比。
 8. 如果存在 Claude Code OAuth 凭据，则获取 Claude Code usage 百分比。
-9. 把 provider 快照发布回菜单栏界面。
+9. 如果 Claude OAuth 被 rate limit，则遵守 `Retry-After` 并尝试 Claude CLI `/usage` 兜底。
+10. 把 provider 快照发布回菜单栏界面。
 
 为了保持刷新流畅，扫描器会限制每个 provider 最多处理最近 1,500 个 JSONL 文件。
 
@@ -116,8 +117,9 @@ CodeBar Pro 围绕本地检查设计：
 - 读取你 Mac 上已有的本地用量日志。
 - 在本机执行 CLI 版本检测。
 - 为了展示 Claude Code quota 百分比，可能读取 Keychain 或 `~/.claude/.credentials.json` 中的 Claude Code OAuth 凭据，并调用 Anthropic usage endpoint。
+- 如果 Claude OAuth endpoint 临时 rate limit，可能在一个短生命周期 PTY 会话中运行本地 `claude` CLI 并解析 `/usage`。
 - 不上传本地 JSONL 日志、prompt 或 transcript 内容。
-- 如果 Claude quota 请求失败或遇到临时 rate limit，会自动回退到本地 token 总数。
+- 如果两个 Claude quota 来源都失败，会自动回退到本地 token 总数。
 
 如果本地 provider 日志里包含敏感 prompt 或元数据，它们仍保留在原本的磁盘位置。CodeBar Pro 只计算聚合后的数量并用于展示。
 
@@ -168,7 +170,7 @@ CodeBarPro/
 
 ### Claude quota 百分比不可用
 
-Claude Code quota 百分比需要可读取的 Claude Code OAuth 凭据，并且 Anthropic usage endpoint 返回成功。如果 endpoint 临时返回 HTTP 429 等错误，CodeBar Pro 会继续展示本地 token 总数，并在 Claude 卡片里显示简短说明。
+Claude Code quota 百分比需要可读取的 Claude Code OAuth 凭据，或可用的本地 `claude` CLI `/usage` 面板。如果 OAuth endpoint 返回 HTTP 429，CodeBar Pro 会记录 `Retry-After` 窗口，在退避期内跳过重复 OAuth 请求，并优先尝试 CLI 兜底，最后才展示本地 token 总数。
 
 ### Xcode 运行后没看到应用窗口
 

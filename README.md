@@ -105,7 +105,8 @@ CodeBar Pro collects data through a small local pipeline:
 6. Parse each JSONL record and bucket usage by record timestamp.
 7. Extract Codex rate-limit percentages when present.
 8. Fetch Claude Code OAuth usage percentages when credentials are available.
-9. Publish provider snapshots back to the menu bar UI.
+9. If Claude OAuth is rate limited, respect `Retry-After` and try the Claude CLI `/usage` fallback.
+10. Publish provider snapshots back to the menu bar UI.
 
 The scanner caps work to the most recent 1,500 JSONL files per provider to keep refreshes responsive.
 
@@ -116,8 +117,9 @@ CodeBar Pro is designed around local inspection:
 - It reads local usage logs from your Mac.
 - It runs local CLI version checks.
 - For Claude Code quota percentages, it can read Claude Code OAuth credentials from Keychain or `~/.claude/.credentials.json` and call Anthropic's usage endpoint.
+- If the Claude OAuth endpoint is temporarily rate limited, it can run the local `claude` CLI in a short-lived PTY session and parse `/usage`.
 - It does not upload local JSONL logs, prompts, or transcript content.
-- If Claude quota access fails or is rate limited, it falls back to local token totals.
+- If both Claude quota sources fail, it falls back to local token totals.
 
 If your local provider logs contain sensitive prompts or metadata, they remain on disk where those provider tools already stored them. CodeBar Pro only computes aggregate counts for display.
 
@@ -168,7 +170,7 @@ Some logs may contain event records without token counters. In that case CodeBar
 
 ### Claude quota percentages are unavailable
 
-Claude Code quota percentages require readable Claude Code OAuth credentials and a successful response from Anthropic's usage endpoint. If the endpoint returns a temporary error such as HTTP 429, CodeBar Pro keeps showing local token totals and adds a short note in the Claude card.
+Claude Code quota percentages require either readable Claude Code OAuth credentials or a working local `claude` CLI `/usage` panel. If the OAuth endpoint returns HTTP 429, CodeBar Pro records the `Retry-After` window, skips repeated OAuth calls during that backoff, and tries the CLI fallback before showing local token totals.
 
 ### Xcode opens but the app is not visible
 
