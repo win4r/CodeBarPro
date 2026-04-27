@@ -15,7 +15,7 @@ It is built for developers who want quick visibility without opening a terminal,
 
 - 🧭 **Menu bar first** - lives quietly in the macOS menu bar with no Dock icon.
 - 📊 **Fast usage overview** - shows today and last-30-days activity for each provider.
-- 📈 **Quota percentages** - surfaces Codex 5-hour/weekly percentages and Claude Code session/weekly percentages when available.
+- 📈 **Quota percentages** - surfaces Codex 5-hour/weekly percentages plus Claude Code session, weekly, Sonnet/Opus, Designs, Daily Routines, and Extra usage metrics when available.
 - 🔢 **Token-aware metrics** - prefers token counters when available and falls back to event counts.
 - 🧩 **Multiple providers** - supports Codex and Claude Code activity sources.
 - 🔍 **Local CLI detection** - checks installed command-line tools and shows version details.
@@ -39,7 +39,7 @@ CodeBar Pro gives you three main surfaces:
 - macOS 14.0 or later.
 - Xcode 16 or later.
 - Optional: `codex` and/or `claude` CLI installed for version detection.
-- Optional: Claude Code OAuth credentials, a readable Chrome/Edge/Brave/Arc `claude.ai` browser session, or a working `claude` CLI for Claude Code quota percentages.
+- Optional: Claude Code OAuth credentials, a readable Chrome/Edge/Brave/Arc `claude.ai` browser session, or a working `claude` CLI for Claude Code quota percentages and supplemental usage windows.
 - Local provider activity logs, when available:
   - `~/.codex`
   - `~/.claude/projects`
@@ -92,7 +92,7 @@ Current test coverage focuses on:
 - Cache invalidation when files change.
 - Command execution, timeout handling, large output draining, and non-zero exits.
 - Preference persistence for refresh cadence and provider enablement.
-- Claude Code quota parsing from OAuth, browser-session, and CLI fallback paths.
+- Claude Code quota parsing from OAuth, browser-session, and CLI fallback paths, including model-specific and supplemental usage windows.
 
 ## 🧠 How It Works
 
@@ -106,9 +106,10 @@ CodeBar Pro collects data through a small local pipeline:
 6. Parse each JSONL record and bucket usage by record timestamp.
 7. Extract Codex rate-limit percentages when present.
 8. Fetch Claude Code OAuth usage percentages when credentials are available.
-9. If Claude OAuth is rate limited or unavailable, use the local `claude.ai` browser session to query Claude Web usage.
-10. If the browser-session path is unavailable, try the Claude CLI `/usage` fallback.
-11. Publish provider snapshots back to the menu bar UI.
+9. Map Claude session, weekly, Sonnet/Opus, Designs, Daily Routines, and Extra usage data when the source provides it.
+10. If Claude OAuth is rate limited or unavailable, use the local `claude.ai` browser session to query Claude Web usage and Extra usage spend.
+11. If the browser-session path is unavailable, try the Claude CLI `/usage` fallback for session, weekly, and model-specific percentages.
+12. Publish provider snapshots back to the menu bar UI.
 
 The scanner caps work to the most recent 1,500 JSONL files per provider to keep refreshes responsive.
 
@@ -119,7 +120,7 @@ CodeBar Pro is designed around local inspection:
 - It reads local usage logs from your Mac.
 - It runs local CLI version checks.
 - For Claude Code quota percentages, it can read Claude Code OAuth credentials from Keychain or `~/.claude/.credentials.json` and call Anthropic's usage endpoint.
-- If the Claude OAuth endpoint is temporarily rate limited or unavailable, it can read local `claude.ai` browser session cookies from Chrome, Edge, Brave, or Arc and call Claude Web usage.
+- If the Claude OAuth endpoint is temporarily rate limited or unavailable, it can read local `claude.ai` browser session cookies from Chrome, Edge, Brave, or Arc and call Claude Web usage and overage endpoints.
 - If browser-session usage is unavailable, it can run the local `claude` CLI in a short-lived PTY session and parse `/usage`.
 - It does not upload local JSONL logs, prompts, or transcript content.
 - If all Claude quota sources fail, it falls back to local token totals.
@@ -173,7 +174,7 @@ Some logs may contain event records without token counters. In that case CodeBar
 
 ### Claude quota percentages are unavailable
 
-Claude Code quota percentages require at least one available quota source: readable Claude Code OAuth credentials, a readable `claude.ai` browser session in Chrome/Edge/Brave/Arc, or a working local `claude` CLI `/usage` panel. If the OAuth endpoint returns HTTP 429, CodeBar Pro records the `Retry-After` window, skips repeated OAuth calls during that backoff, tries Claude Web usage through the browser session, then tries the CLI fallback before showing local token totals.
+Claude Code quota percentages require at least one available quota source: readable Claude Code OAuth credentials, a readable `claude.ai` browser session in Chrome/Edge/Brave/Arc, or a working local `claude` CLI `/usage` panel. OAuth and Web sources can expose supplemental windows such as Sonnet/Opus, Designs, Daily Routines, and Extra usage. CLI fallback is limited to what the `/usage` panel prints. If the OAuth endpoint returns HTTP 429, CodeBar Pro records the `Retry-After` window, skips repeated OAuth calls during that backoff, tries Claude Web usage through the browser session, then tries the CLI fallback before showing local token totals.
 
 ### Xcode opens but the app is not visible
 

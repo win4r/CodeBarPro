@@ -85,13 +85,15 @@ struct UsageMetric: Equatable, Sendable {
         case tokens
         case events
         case percent
+        case currency
     }
 
     var title: String
     var used: Double
     var limit: Double?
     var unit: Unit
-    var resetsAt: Date?
+    var currencyCode: String? = nil
+    var resetsAt: Date? = nil
 
     nonisolated var percentUsed: Double? {
         guard let limit, limit > 0 else { return nil }
@@ -110,6 +112,8 @@ struct UsageMetric: Equatable, Sendable {
             return NumberFormat.integer(Int(used))
         case .percent:
             return "\(NumberFormat.decimal(used))%"
+        case .currency:
+            return NumberFormat.currency(used, code: currencyCode)
         }
     }
 }
@@ -121,6 +125,7 @@ struct ProviderSnapshot: Equatable, Identifiable, Sendable {
     var state: ProviderConnectionState
     var primary: UsageMetric
     var secondary: UsageMetric
+    var additionalMetrics: [UsageMetric] = []
     var updatedAt: Date?
     var localLogCount: Int
     var notes: String?
@@ -141,6 +146,7 @@ struct ProviderSnapshot: Equatable, Identifiable, Sendable {
                 used: 0,
                 limit: nil,
                 unit: .events,
+                currencyCode: nil,
                 resetsAt: nil),
             updatedAt: nil,
             localLogCount: 0,
@@ -204,5 +210,11 @@ enum NumberFormat {
 
     nonisolated static func decimal(_ value: Double) -> String {
         value.formatted(.number.precision(.fractionLength(0...1)))
+    }
+
+    nonisolated static func currency(_ value: Double, code: String?) -> String {
+        let normalizedCode = code?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let prefix = normalizedCode == "USD" || normalizedCode == nil ? "$" : "\(normalizedCode!) "
+        return "\(prefix)\(String(format: "%.2f", value))"
     }
 }

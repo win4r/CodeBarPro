@@ -10,11 +10,12 @@ import CommonCrypto
 
 struct ProviderRateLimitFetchResult: Equatable, Sendable {
     var rateLimits: LocalUsageScanner.RateLimitSnapshot?
+    var supplementalMetrics: [UsageMetric] = []
     var source: String?
     var failureReason: String?
 
     nonisolated static var unavailable: ProviderRateLimitFetchResult {
-        ProviderRateLimitFetchResult(rateLimits: nil, source: nil, failureReason: nil)
+        ProviderRateLimitFetchResult(rateLimits: nil, supplementalMetrics: [], source: nil, failureReason: nil)
     }
 }
 
@@ -48,6 +49,7 @@ enum ClaudeUsageProbe {
                 let rateLimits = try rateLimits(from: usage, observedAt: now)
                 return ProviderRateLimitFetchResult(
                     rateLimits: rateLimits,
+                    supplementalMetrics: supplementalMetrics(from: usage),
                     source: "Claude OAuth",
                     failureReason: nil)
             } catch let error as ClaudeUsageProbeError {
@@ -61,9 +63,10 @@ enum ClaudeUsageProbe {
         }
 
         do {
-            let rateLimits = try await fetchWebRateLimits(observedAt: now)
+            let usageResult = try await fetchWebUsageResult(observedAt: now)
             return ProviderRateLimitFetchResult(
-                rateLimits: rateLimits,
+                rateLimits: usageResult.rateLimits,
+                supplementalMetrics: usageResult.supplementalMetrics,
                 source: "Claude Web",
                 failureReason: nil)
         } catch {
@@ -119,9 +122,18 @@ enum ClaudeUsageProbe {
         }
 
         let secondary = rateLimitWindow(usage.sevenDay, windowMinutes: weeklyWindowMinutes)
+        let modelSpecific = usage.sevenDaySonnet ?? usage.sevenDayOpus
+        let modelTitle = usage.sevenDaySonnet == nil && usage.sevenDayOpus != nil
+            ? "Opus weekly"
+            : "Sonnet weekly"
+        let tertiary = rateLimitWindow(
+            modelSpecific,
+            windowMinutes: weeklyWindowMinutes,
+            title: modelTitle)
         return LocalUsageScanner.RateLimitSnapshot(
             primary: primary,
             secondary: secondary,
+            tertiary: tertiary,
             observedAt: observedAt)
     }
 
@@ -150,10 +162,36 @@ enum ClaudeUsageProbe {
         let lines = panel.components(separatedBy: .newlines)
         let context = LabelSearchContext(lines: lines)
 
-        guard let primaryUsed = percentUsed(
+        var primaryUsed = percentUsed(
             labelSubstrings: ["Current session"],
             context: context)
-        else {
+        var secondaryUsed = percentUsed(
+            labelSubstrings: ["Current week (all models)", "Current week"],
+            context: context)
+        var modelSpecificUsed = percentUsed(
+            labelSubstrings: ["Current week (Opus)", "Current week (Sonnet only)", "Current week (Sonnet)"],
+            context: context)
+
+        let hasWeeklyLabel = context.contains("currentweek")
+        let hasModelSpecificLabel = context.contains("currentweekopus")
+            || context.contains("currentweeksonnet")
+        if primaryUsed == nil
+            || (hasWeeklyLabel && secondaryUsed == nil)
+            || (hasModelSpecificLabel && modelSpecificUsed == nil)
+        {
+            let ordered = allPercentUsages(in: panel)
+            if primaryUsed == nil, ordered.indices.contains(0) {
+                primaryUsed = ordered[0]
+            }
+            if hasWeeklyLabel, secondaryUsed == nil, ordered.indices.contains(1) {
+                secondaryUsed = ordered[1]
+            }
+            if hasModelSpecificLabel, modelSpecificUsed == nil, ordered.indices.contains(2) {
+                modelSpecificUsed = ordered[2]
+            }
+        }
+
+        guard let primaryUsed else {
             if usageDataStayedLoading(in: clean) {
                 throw ClaudeUsageProbeError.cliUsageFailed(
                     "Claude CLI /usage did not return quota percentages; remote usage data stayed loading.")
@@ -161,9 +199,9 @@ enum ClaudeUsageProbe {
             throw ClaudeUsageProbeError.cliUsageFailed("Claude CLI /usage did not include Current session.")
         }
 
-        let secondaryUsed = percentUsed(
-            labelSubstrings: ["Current week (all models)", "Current week"],
-            context: context)
+        let modelSpecificTitle = context.contains("currentweekopus")
+            ? "Opus weekly"
+            : "Sonnet weekly"
 
         return LocalUsageScanner.RateLimitSnapshot(
             primary: LocalUsageScanner.RateLimitWindow(
@@ -181,6 +219,16 @@ enum ClaudeUsageProbe {
                         labelSubstrings: ["Current week (all models)", "Current week"],
                         context: context,
                         now: observedAt))
+            },
+            tertiary: modelSpecificUsed.map {
+                LocalUsageScanner.RateLimitWindow(
+                    usedPercent: $0,
+                    windowMinutes: weeklyWindowMinutes,
+                    resetsAt: resetDate(
+                        labelSubstrings: ["Current week (Sonnet only)", "Current week (Sonnet)", "Current week (Opus)"],
+                        context: context,
+                        now: observedAt),
+                    title: modelSpecificTitle)
             },
             observedAt: observedAt)
     }
@@ -296,16 +344,22 @@ enum ClaudeUsageProbe {
         return try decodeOAuthUsage(data)
     }
 
-    private nonisolated static func fetchWebRateLimits(
+    private nonisolated static func fetchWebUsageResult(
         observedAt: Date)
-        async throws -> LocalUsageScanner.RateLimitSnapshot
+        async throws -> (rateLimits: LocalUsageScanner.RateLimitSnapshot, supplementalMetrics: [UsageMetric])
     {
         let cookieHeader = try await Task.detached(priority: .utility) {
             try claudeWebCookieHeader()
         }.value
         let organization = try await fetchWebOrganization(cookieHeader: cookieHeader)
         let usage = try await fetchWebUsage(orgID: organization.id, cookieHeader: cookieHeader)
-        return try rateLimits(from: usage, observedAt: observedAt)
+        var supplemental = supplementalMetrics(from: usage)
+        if usage.extraUsageMetric == nil,
+           let extraCost = await fetchWebExtraUsageCost(orgID: organization.id, cookieHeader: cookieHeader)
+        {
+            supplemental.append(extraCost)
+        }
+        return (try rateLimits(from: usage, observedAt: observedAt), supplemental)
     }
 
     private nonisolated static func fetchWebOrganization(
@@ -365,6 +419,31 @@ enum ClaudeUsageProbe {
             throw ClaudeUsageProbeError.webUsageFailed("Claude Web session is unauthorized or blocked.")
         default:
             throw ClaudeUsageProbeError.webUsageFailed("Claude Web usage returned HTTP \(httpResponse.statusCode).")
+        }
+    }
+
+    private nonisolated static func fetchWebExtraUsageCost(
+        orgID: String,
+        cookieHeader: String)
+        async -> UsageMetric?
+    {
+        guard let url = URL(string: "\(claudeWebBaseURL)/organizations/\(orgID)/overage_spend_limit") else {
+            return nil
+        }
+
+        var request = claudeWebRequest(url: url, cookieHeader: cookieHeader)
+        request.httpMethod = "GET"
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200
+            else {
+                return nil
+            }
+            return try JSONDecoder().decode(ClaudeOverageSpendLimitResponse.self, from: data).usageMetric
+        } catch {
+            return nil
         }
     }
 
@@ -502,14 +581,69 @@ enum ClaudeUsageProbe {
 
     private nonisolated static func rateLimitWindow(
         _ window: ClaudeOAuthUsageWindow?,
-        windowMinutes: Int)
+        windowMinutes: Int,
+        title: String? = nil)
         -> LocalUsageScanner.RateLimitWindow?
     {
         guard let usedPercent = window?.utilization else { return nil }
         return LocalUsageScanner.RateLimitWindow(
             usedPercent: usedPercent,
             windowMinutes: windowMinutes,
-            resetsAt: window?.resetsAt.flatMap(parseISO8601Date))
+            resetsAt: window?.resetsAt.flatMap(parseISO8601Date),
+            title: title)
+    }
+
+    nonisolated static func supplementalMetrics(from usage: ClaudeOAuthUsageResponse) -> [UsageMetric] {
+        var metrics: [UsageMetric] = []
+        metrics.append(contentsOf: extraRateWindowMetrics(from: usage))
+        if let extraUsage = usage.extraUsageMetric {
+            metrics.append(extraUsage)
+        }
+        return metrics
+    }
+
+    private nonisolated static func extraRateWindowMetrics(from usage: ClaudeOAuthUsageResponse) -> [UsageMetric] {
+        let definitions: [(title: String, window: ClaudeOAuthUsageWindow?, sourceKey: String?)] = [
+            ("Designs", usage.sevenDayDesign, usage.sevenDayDesignSourceKey),
+            ("Daily Routines", usage.sevenDayRoutines, usage.sevenDayRoutinesSourceKey),
+        ]
+
+        return definitions.compactMap { definition in
+            if let window = definition.window,
+               let usageWindow = rateLimitWindow(
+                   window,
+                   windowMinutes: weeklyWindowMinutes,
+                   title: definition.title)
+            {
+                return UsageMetric(
+                    title: definition.title,
+                    used: usageWindow.usedPercent,
+                    limit: 100,
+                    unit: .percent,
+                    resetsAt: usageWindow.resetsAt)
+            }
+
+            guard definition.sourceKey != nil else { return nil }
+            return UsageMetric(
+                title: definition.title,
+                used: 0,
+                limit: 100,
+                unit: .percent,
+                resetsAt: nil)
+        }
+    }
+
+    nonisolated static func normalizeClaudeExtraUsageAmounts(
+        used: Double,
+        limit: Double)
+        -> (used: Double, limit: Double)
+    {
+        (used: used / 100.0, limit: limit / 100.0)
+    }
+
+    nonisolated static func normalizedCurrencyCode(_ code: String?) -> String {
+        let trimmed = code?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty ?? true) ? "USD" : trimmed!.uppercased()
     }
 
     private nonisolated static func parseISO8601Date(_ string: String) -> Date? {
@@ -596,6 +730,20 @@ enum ClaudeUsageProbe {
             return nil
         }
         return Double(line[valueRange])
+    }
+
+    private nonisolated static func allPercentUsages(in text: String) -> [Double] {
+        text.components(separatedBy: .newlines).compactMap { line in
+            if let value = percentUsed(from: line) {
+                return value
+            }
+            guard !isLikelyStatusContextLine(line),
+                  let rawPercent = firstPercent(in: line)
+            else {
+                return nil
+            }
+            return max(0, min(100, rawPercent))
+        }
     }
 
     private nonisolated static func resetText(in line: String) -> String? {
@@ -931,6 +1079,10 @@ private struct LabelSearchContext {
         self.lines = lines
         normalizedLines = lines.map { ClaudeUsageProbe.normalizedForLabelSearch($0) }
     }
+
+    nonisolated func contains(_ needle: String) -> Bool {
+        normalizedLines.contains { $0.contains(needle) }
+    }
 }
 
 private enum ClaudePTYUsageRunner {
@@ -1137,27 +1289,77 @@ struct ClaudeOAuthCredential: Equatable, Sendable {
 struct ClaudeOAuthUsageResponse: Decodable, Equatable, Sendable {
     var fiveHour: ClaudeOAuthUsageWindow?
     var sevenDay: ClaudeOAuthUsageWindow?
+    var sevenDayOAuthApps: ClaudeOAuthUsageWindow?
     var sevenDaySonnet: ClaudeOAuthUsageWindow?
     var sevenDayOpus: ClaudeOAuthUsageWindow?
+    var sevenDayDesign: ClaudeOAuthUsageWindow?
+    var sevenDayRoutines: ClaudeOAuthUsageWindow?
+    var sevenDayDesignSourceKey: String?
+    var sevenDayRoutinesSourceKey: String?
+    var iguanaNecktie: ClaudeOAuthUsageWindow?
+    var extraUsage: ClaudeExtraUsage?
+
+    nonisolated var extraUsageMetric: UsageMetric? {
+        extraUsage?.usageMetric
+    }
 
     init(
         fiveHour: ClaudeOAuthUsageWindow?,
         sevenDay: ClaudeOAuthUsageWindow?,
+        sevenDayOAuthApps: ClaudeOAuthUsageWindow? = nil,
         sevenDaySonnet: ClaudeOAuthUsageWindow? = nil,
-        sevenDayOpus: ClaudeOAuthUsageWindow? = nil)
+        sevenDayOpus: ClaudeOAuthUsageWindow? = nil,
+        sevenDayDesign: ClaudeOAuthUsageWindow? = nil,
+        sevenDayRoutines: ClaudeOAuthUsageWindow? = nil,
+        sevenDayDesignSourceKey: String? = nil,
+        sevenDayRoutinesSourceKey: String? = nil,
+        iguanaNecktie: ClaudeOAuthUsageWindow? = nil,
+        extraUsage: ClaudeExtraUsage? = nil)
     {
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
+        self.sevenDayOAuthApps = sevenDayOAuthApps
         self.sevenDaySonnet = sevenDaySonnet
         self.sevenDayOpus = sevenDayOpus
+        self.sevenDayDesign = sevenDayDesign
+        self.sevenDayRoutines = sevenDayRoutines
+        self.sevenDayDesignSourceKey = sevenDayDesignSourceKey
+        self.sevenDayRoutinesSourceKey = sevenDayRoutinesSourceKey
+        self.iguanaNecktie = iguanaNecktie
+        self.extraUsage = extraUsage
     }
 
     nonisolated init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: DynamicCodingKey.self)
         fiveHour = Self.decodeWindow(in: container, keys: ["five_hour"])
         sevenDay = Self.decodeWindow(in: container, keys: ["seven_day"])
+        sevenDayOAuthApps = Self.decodeWindow(in: container, keys: ["seven_day_oauth_apps"])
         sevenDaySonnet = Self.decodeWindow(in: container, keys: ["seven_day_sonnet"])
         sevenDayOpus = Self.decodeWindow(in: container, keys: ["seven_day_opus"])
+        let design = Self.decodeWindowWithSource(in: container, keys: [
+            "seven_day_design",
+            "seven_day_claude_design",
+            "claude_design",
+            "design",
+            "seven_day_omelette",
+            "omelette",
+            "omelette_promotional",
+        ])
+        sevenDayDesign = design.window
+        sevenDayDesignSourceKey = design.sourceKey
+        let routines = Self.decodeWindowWithSource(in: container, keys: [
+            "seven_day_routines",
+            "seven_day_claude_routines",
+            "claude_routines",
+            "routines",
+            "routine",
+            "seven_day_cowork",
+            "cowork",
+        ])
+        sevenDayRoutines = routines.window
+        sevenDayRoutinesSourceKey = routines.sourceKey
+        iguanaNecktie = Self.decodeWindow(in: container, keys: ["iguana_necktie"])
+        extraUsage = Self.decodeValue(in: container, keys: ["extra_usage"])
     }
 
     private nonisolated static func decodeWindow(
@@ -1165,9 +1367,34 @@ struct ClaudeOAuthUsageResponse: Decodable, Equatable, Sendable {
         keys: [String])
         -> ClaudeOAuthUsageWindow?
     {
+        decodeValue(in: container, keys: keys)
+    }
+
+    private nonisolated static func decodeWindowWithSource(
+        in container: KeyedDecodingContainer<DynamicCodingKey>,
+        keys: [String])
+        -> (window: ClaudeOAuthUsageWindow?, sourceKey: String?)
+    {
+        var firstNullKey: String?
         for keyName in keys {
             guard let key = DynamicCodingKey(stringValue: keyName) else { continue }
+            guard container.contains(key) else { continue }
             if let value = try? container.decodeIfPresent(ClaudeOAuthUsageWindow.self, forKey: key) {
+                return (value, keyName)
+            }
+            firstNullKey = firstNullKey ?? keyName
+        }
+        return (nil, firstNullKey)
+    }
+
+    private nonisolated static func decodeValue<T: Decodable>(
+        in container: KeyedDecodingContainer<DynamicCodingKey>,
+        keys: [String])
+        -> T?
+    {
+        for keyName in keys {
+            guard let key = DynamicCodingKey(stringValue: keyName) else { continue }
+            if let value = try? container.decodeIfPresent(T.self, forKey: key) {
                 return value
             }
         }
@@ -1210,6 +1437,125 @@ struct ClaudeOAuthUsageWindow: Decodable, Equatable, Sendable {
             return Double(string)
         }
         return nil
+    }
+}
+
+struct ClaudeExtraUsage: Decodable, Equatable, Sendable {
+    var isEnabled: Bool?
+    var monthlyLimit: Double?
+    var usedCredits: Double?
+    var utilization: Double?
+    var currency: String?
+
+    enum CodingKeys: String, CodingKey {
+        case isEnabled = "is_enabled"
+        case monthlyLimit = "monthly_limit"
+        case usedCredits = "used_credits"
+        case utilization
+        case currency
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        isEnabled = try? container.decodeIfPresent(Bool.self, forKey: .isEnabled)
+        monthlyLimit = Self.decodeDouble(for: .monthlyLimit, in: container)
+        usedCredits = Self.decodeDouble(for: .usedCredits, in: container)
+        utilization = Self.decodeDouble(for: .utilization, in: container)
+        currency = try? container.decodeIfPresent(String.self, forKey: .currency)
+    }
+
+    private nonisolated static func decodeDouble(
+        for key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>)
+        -> Double?
+    {
+        if let double = try? container.decodeIfPresent(Double.self, forKey: key) {
+            return double
+        }
+        if let int = try? container.decodeIfPresent(Int.self, forKey: key) {
+            return Double(int)
+        }
+        if let string = try? container.decodeIfPresent(String.self, forKey: key) {
+            return Double(string)
+        }
+        return nil
+    }
+
+    nonisolated var usageMetric: UsageMetric? {
+        guard isEnabled == true,
+              let usedCredits,
+              let monthlyLimit
+        else {
+            return nil
+        }
+        let normalized = ClaudeUsageProbe.normalizeClaudeExtraUsageAmounts(
+            used: usedCredits,
+            limit: monthlyLimit)
+        return UsageMetric(
+            title: "Extra usage",
+            used: normalized.used,
+            limit: normalized.limit,
+            unit: .currency,
+            currencyCode: ClaudeUsageProbe.normalizedCurrencyCode(currency),
+            resetsAt: nil)
+    }
+}
+
+private struct ClaudeOverageSpendLimitResponse: Decodable, Equatable, Sendable {
+    var monthlyCreditLimit: Double?
+    var currency: String?
+    var usedCredits: Double?
+    var isEnabled: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case monthlyCreditLimit = "monthly_credit_limit"
+        case currency
+        case usedCredits = "used_credits"
+        case isEnabled = "is_enabled"
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        monthlyCreditLimit = Self.decodeDouble(for: .monthlyCreditLimit, in: container)
+        currency = try? container.decodeIfPresent(String.self, forKey: .currency)
+        usedCredits = Self.decodeDouble(for: .usedCredits, in: container)
+        isEnabled = try? container.decodeIfPresent(Bool.self, forKey: .isEnabled)
+    }
+
+    private nonisolated static func decodeDouble(
+        for key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>)
+        -> Double?
+    {
+        if let double = try? container.decodeIfPresent(Double.self, forKey: key) {
+            return double
+        }
+        if let int = try? container.decodeIfPresent(Int.self, forKey: key) {
+            return Double(int)
+        }
+        if let string = try? container.decodeIfPresent(String.self, forKey: key) {
+            return Double(string)
+        }
+        return nil
+    }
+
+    nonisolated var usageMetric: UsageMetric? {
+        guard isEnabled == true,
+              let usedCredits,
+              let monthlyCreditLimit
+        else {
+            return nil
+        }
+        let normalized = ClaudeUsageProbe.normalizeClaudeExtraUsageAmounts(
+            used: usedCredits,
+            limit: monthlyCreditLimit)
+        return UsageMetric(
+            title: "Extra usage",
+            used: normalized.used,
+            limit: normalized.limit,
+            unit: .currency,
+            currencyCode: ClaudeUsageProbe.normalizedCurrencyCode(currency),
+            resetsAt: nil)
     }
 }
 

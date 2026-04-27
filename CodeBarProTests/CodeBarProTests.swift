@@ -143,6 +143,50 @@ struct CodeBarProTests {
         #expect(rateLimits.observedAt == observedAt)
     }
 
+    @Test func claudeOAuthUsageMapsSupplementalPercentagesAndExtraUsage() throws {
+        let json = """
+        {
+          "five_hour": {
+            "utilization": 28.5,
+            "resets_at": "2026-04-27T02:00:00Z"
+          },
+          "seven_day": {
+            "utilization": 61,
+            "resets_at": "2026-04-30T02:00:00Z"
+          },
+          "seven_day_sonnet": {
+            "utilization": 17,
+            "resets_at": "2026-04-30T02:00:00Z"
+          },
+          "seven_day_design": {
+            "utilization": 9,
+            "resets_at": "2026-04-30T02:00:00Z"
+          },
+          "seven_day_cowork": null,
+          "extra_usage": {
+            "is_enabled": true,
+            "monthly_limit": 2000,
+            "used_credits": 450,
+            "currency": "USD"
+          }
+        }
+        """
+
+        let usage = try ClaudeUsageProbe.decodeOAuthUsage(try #require(json.data(using: .utf8)))
+        let rateLimits = try ClaudeUsageProbe.rateLimits(
+            from: usage,
+            observedAt: try date("2026-04-27T01:00:00Z"))
+        let supplemental = ClaudeUsageProbe.supplementalMetrics(from: usage)
+
+        #expect(rateLimits.tertiary?.title == "Sonnet weekly")
+        #expect(rateLimits.tertiary?.usedPercent == 17)
+        #expect(supplemental.map(\.title) == ["Designs", "Daily Routines", "Extra usage"])
+        #expect(supplemental[0].formattedValue == "9%")
+        #expect(supplemental[1].formattedValue == "0%")
+        #expect(supplemental[2].formattedValue == "$4.50")
+        #expect(supplemental[2].limit == 20)
+    }
+
     @Test func claudeSnapshotPrefersOAuthRateLimitPercentages() {
         let summary = LocalUsageScanner.Summary(
             todayTokens: 1_200_000,
@@ -177,6 +221,48 @@ struct CodeBarProTests {
         #expect(snapshot.secondary.title == "Weekly limit")
         #expect(snapshot.secondary.formattedValue == "61%")
         #expect(snapshot.notes?.contains("Claude OAuth.") == true)
+    }
+
+    @Test func claudeSnapshotShowsSupplementalQuotaMetrics() {
+        let summary = LocalUsageScanner.Summary(
+            todayTokens: 1_200_000,
+            last30DaysTokens: 2_500_000,
+            todayEvents: 3,
+            last30DaysEvents: 4,
+            scannedFiles: 2)
+        let externalRateLimits = ProviderRateLimitFetchResult(
+            rateLimits: LocalUsageScanner.RateLimitSnapshot(
+                primary: LocalUsageScanner.RateLimitWindow(
+                    usedPercent: 28,
+                    windowMinutes: 300,
+                    resetsAt: nil),
+                secondary: LocalUsageScanner.RateLimitWindow(
+                    usedPercent: 61,
+                    windowMinutes: 10_080,
+                    resetsAt: nil),
+                tertiary: LocalUsageScanner.RateLimitWindow(
+                    usedPercent: 17,
+                    windowMinutes: 10_080,
+                    resetsAt: nil,
+                    title: "Sonnet weekly"),
+                observedAt: Date()),
+            supplementalMetrics: [
+                UsageMetric(title: "Extra usage", used: 4.5, limit: 20, unit: .currency, currencyCode: "USD"),
+            ],
+            source: "Claude OAuth",
+            failureReason: nil)
+
+        let snapshot = LocalProviderProbe.makeSnapshot(
+            provider: .claude,
+            enabled: true,
+            version: "2.1.119 (Claude Code)",
+            summary: summary,
+            externalRateLimits: externalRateLimits)
+
+        #expect(snapshot.additionalMetrics.map(\.title) == ["Sonnet weekly", "Extra usage"])
+        #expect(snapshot.additionalMetrics[0].formattedValue == "17%")
+        #expect(snapshot.additionalMetrics[1].formattedValue == "$4.50")
+        #expect(snapshot.additionalMetrics[1].percentUsed == 0.225)
     }
 
     @Test func claudeSnapshotUsesSessionPercentageWhenWeeklyUnavailable() {
@@ -256,6 +342,58 @@ struct CodeBarProTests {
         #expect(rateLimits.primary?.windowMinutes == 300)
         #expect(rateLimits.secondary?.usedPercent == 36)
         #expect(rateLimits.secondary?.windowMinutes == 10_080)
+    }
+
+    @Test func claudeCLIUsageOutputMapsModelSpecificWeeklyPercentage() throws {
+        let output = """
+        Settings: Usage
+
+        Current session
+        11% used
+
+        Current week (all models)
+        44% used
+
+        Current week (Sonnet only)
+        29% used
+        Resets Apr 30 at 10:00 AM
+        """
+
+        let rateLimits = try ClaudeUsageProbe.rateLimits(
+            fromCLIUsageOutput: output,
+            observedAt: try date("2026-04-27T18:00:00Z"))
+
+        #expect(rateLimits.tertiary?.title == "Sonnet weekly")
+        #expect(rateLimits.tertiary?.usedPercent == 29)
+        #expect(rateLimits.tertiary?.windowMinutes == 10_080)
+    }
+
+    @Test func claudeCLIUsageOutputFallsBackToOrderedPercentages() throws {
+        let output = """
+        Settings: Usage
+
+        Current session
+        usage progress
+
+        Current week (all models)
+        weekly progress
+
+        Current week (Opus)
+        model progress
+
+        12%
+        34%
+        56%
+        """
+
+        let rateLimits = try ClaudeUsageProbe.rateLimits(
+            fromCLIUsageOutput: output,
+            observedAt: try date("2026-04-27T18:00:00Z"))
+
+        #expect(rateLimits.primary?.usedPercent == 12)
+        #expect(rateLimits.secondary?.usedPercent == 34)
+        #expect(rateLimits.tertiary?.title == "Opus weekly")
+        #expect(rateLimits.tertiary?.usedPercent == 56)
     }
 
     @Test func claudeCLIUsageOutputMapsUsedPercentages() throws {

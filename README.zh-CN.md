@@ -15,7 +15,7 @@ CodeBar Pro 是一个精致的原生 macOS 菜单栏应用，用来查看本机 
 
 - 🧭 **菜单栏优先** - 安静地常驻 macOS 菜单栏，不显示 Dock 图标。
 - 📊 **快速用量概览** - 展示每个 provider 的今日用量和最近 30 天用量。
-- 📈 **Quota 百分比** - 可展示 Codex 5 小时/weekly 百分比，以及 Claude Code session/weekly 百分比。
+- 📈 **Quota 百分比** - 可展示 Codex 5 小时/weekly 百分比，以及 Claude Code session、weekly、Sonnet/Opus、Designs、Daily Routines、Extra usage 等指标。
 - 🔢 **优先展示 token** - 如果日志里存在 token 计数就展示 token，否则回退到事件数。
 - 🧩 **多 provider 支持** - 支持 Codex 和 Claude Code 活动数据。
 - 🔍 **本机 CLI 检测** - 检查命令行工具是否可用，并展示版本信息。
@@ -39,7 +39,7 @@ CodeBar Pro 主要由三部分组成：
 - macOS 14.0 或更高版本。
 - Xcode 16 或更高版本。
 - 可选：安装 `codex` 或 `claude` CLI，用于版本检测。
-- 可选：存在 Claude Code OAuth 凭据、Chrome/Edge/Brave/Arc 中可读取的 `claude.ai` 浏览器会话，或可用的 `claude` CLI，用于 Claude Code quota 百分比。
+- 可选：存在 Claude Code OAuth 凭据、Chrome/Edge/Brave/Arc 中可读取的 `claude.ai` 浏览器会话，或可用的 `claude` CLI，用于 Claude Code quota 百分比和补充用量窗口。
 - 本机存在可读取的 provider 活动日志：
   - `~/.codex`
   - `~/.claude/projects`
@@ -92,7 +92,7 @@ xcodebuild test \
 - 文件变化后的缓存失效。
 - 命令执行、超时处理、大输出读取、非零退出。
 - 刷新频率和 provider 启用状态的偏好保存。
-- Claude Code quota 的 OAuth、浏览器会话和 CLI 兜底解析路径。
+- Claude Code quota 的 OAuth、浏览器会话和 CLI 兜底解析路径，包括模型专属和补充用量窗口。
 
 ## 🧠 工作方式
 
@@ -106,9 +106,10 @@ CodeBar Pro 的本地数据流程很小：
 6. 解析每条 JSONL 记录，并按记录时间戳统计用量。
 7. 如果存在 Codex rate limit 数据，则提取使用百分比。
 8. 如果存在 Claude Code OAuth 凭据，则获取 Claude Code usage 百分比。
-9. 如果 Claude OAuth 被 rate limit 或不可用，则使用本机 `claude.ai` 浏览器会话查询 Claude Web usage。
-10. 如果浏览器会话路径不可用，则尝试 Claude CLI `/usage` 兜底。
-11. 把 provider 快照发布回菜单栏界面。
+9. 如果来源提供对应数据，则映射 Claude session、weekly、Sonnet/Opus、Designs、Daily Routines 和 Extra usage。
+10. 如果 Claude OAuth 被 rate limit 或不可用，则使用本机 `claude.ai` 浏览器会话查询 Claude Web usage 和 Extra usage spend。
+11. 如果浏览器会话路径不可用，则尝试 Claude CLI `/usage` 兜底，解析 session、weekly 和模型专属百分比。
+12. 把 provider 快照发布回菜单栏界面。
 
 为了保持刷新流畅，扫描器会限制每个 provider 最多处理最近 1,500 个 JSONL 文件。
 
@@ -119,7 +120,7 @@ CodeBar Pro 围绕本地检查设计：
 - 读取你 Mac 上已有的本地用量日志。
 - 在本机执行 CLI 版本检测。
 - 为了展示 Claude Code quota 百分比，可能读取 Keychain 或 `~/.claude/.credentials.json` 中的 Claude Code OAuth 凭据，并调用 Anthropic usage endpoint。
-- 如果 Claude OAuth endpoint 临时 rate limit 或不可用，可能从 Chrome、Edge、Brave 或 Arc 读取本机 `claude.ai` 浏览器会话 cookie，并调用 Claude Web usage。
+- 如果 Claude OAuth endpoint 临时 rate limit 或不可用，可能从 Chrome、Edge、Brave 或 Arc 读取本机 `claude.ai` 浏览器会话 cookie，并调用 Claude Web usage 和 overage endpoint。
 - 如果浏览器会话 usage 不可用，可能在一个短生命周期 PTY 会话中运行本地 `claude` CLI 并解析 `/usage`。
 - 不上传本地 JSONL 日志、prompt 或 transcript 内容。
 - 如果所有 Claude quota 来源都失败，会自动回退到本地 token 总数。
@@ -173,7 +174,7 @@ CodeBarPro/
 
 ### Claude quota 百分比不可用
 
-Claude Code quota 百分比需要至少一种可用来源：可读取的 Claude Code OAuth 凭据、Chrome/Edge/Brave/Arc 中可读取的 `claude.ai` 浏览器会话，或可用的本地 `claude` CLI `/usage` 面板。如果 OAuth endpoint 返回 HTTP 429，CodeBar Pro 会记录 `Retry-After` 窗口，在退避期内跳过重复 OAuth 请求，接着通过浏览器会话尝试 Claude Web usage，再尝试 CLI 兜底，最后才展示本地 token 总数。
+Claude Code quota 百分比需要至少一种可用来源：可读取的 Claude Code OAuth 凭据、Chrome/Edge/Brave/Arc 中可读取的 `claude.ai` 浏览器会话，或可用的本地 `claude` CLI `/usage` 面板。OAuth 和 Web 来源可以提供 Sonnet/Opus、Designs、Daily Routines、Extra usage 等补充窗口；CLI 兜底只能展示 `/usage` 面板实际打印出来的内容。如果 OAuth endpoint 返回 HTTP 429，CodeBar Pro 会记录 `Retry-After` 窗口，在退避期内跳过重复 OAuth 请求，接着通过浏览器会话尝试 Claude Web usage，再尝试 CLI 兜底，最后才展示本地 token 总数。
 
 ### Xcode 运行后没看到应用窗口
 

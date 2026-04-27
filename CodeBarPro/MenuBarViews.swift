@@ -122,6 +122,9 @@ struct ProviderCard: View {
 
             MetricRow(metric: snapshot.primary)
             MetricRow(metric: snapshot.secondary)
+            ForEach(snapshot.additionalMetrics, id: \.title) { metric in
+                MetricRow(metric: metric)
+            }
 
             if let notes = snapshot.notes {
                 Text(notes)
@@ -181,6 +184,11 @@ struct MetricRow: View {
         case .events:
             return "\(metric.formattedValue) events"
         case .percent:
+            return metric.formattedValue
+        case .currency:
+            if let limit = metric.limit {
+                return "\(metric.formattedValue) / \(NumberFormat.currency(limit, code: metric.currencyCode))"
+            }
             return metric.formattedValue
         }
     }

@@ -74,7 +74,14 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
                 events: summary.last30DaysEvents,
                 reset: nil)
         }
-        let hasRateLimitMetric = rateLimits?.primary != nil || rateLimits?.secondary != nil
+        let additionalMetrics = Self.additionalMetrics(
+            provider: provider,
+            rateLimits: rateLimits,
+            externalRateLimits: externalRateLimits)
+        let hasRateLimitMetric = rateLimits?.primary != nil
+            || rateLimits?.secondary != nil
+            || rateLimits?.tertiary != nil
+            || !externalRateLimits.supplementalMetrics.isEmpty
 
         let notes: String?
         if summary.scannedFiles == 0 {
@@ -98,6 +105,7 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
             state: .ready(version),
             primary: primary,
             secondary: secondary,
+            additionalMetrics: additionalMetrics,
             updatedAt: summary.lastActivity ?? Date(),
             localLogCount: summary.scannedFiles,
             notes: notes)
@@ -122,6 +130,33 @@ struct LocalProviderProbe: ProviderProbing, Sendable {
             limit: 100,
             unit: .percent,
             resetsAt: window.resetsAt)
+    }
+
+    private nonisolated static func rateLimitMetric(
+        _ window: LocalUsageScanner.RateLimitWindow,
+        title: String)
+        -> UsageMetric
+    {
+        UsageMetric(
+            title: title,
+            used: window.usedPercent,
+            limit: 100,
+            unit: .percent,
+            resetsAt: window.resetsAt)
+    }
+
+    private nonisolated static func additionalMetrics(
+        provider: UsageProvider,
+        rateLimits: LocalUsageScanner.RateLimitSnapshot?,
+        externalRateLimits: ProviderRateLimitFetchResult)
+        -> [UsageMetric]
+    {
+        var metrics: [UsageMetric] = []
+        if provider == .claude, let tertiary = rateLimits?.tertiary {
+            metrics.append(Self.rateLimitMetric(tertiary, title: tertiary.title ?? "Sonnet weekly"))
+        }
+        metrics.append(contentsOf: externalRateLimits.supplementalMetrics)
+        return metrics
     }
 
     private nonisolated static func rateLimitTitle(_ windowMinutes: Int, provider: UsageProvider) -> String {
@@ -375,11 +410,13 @@ enum LocalUsageScanner {
         var usedPercent: Double
         var windowMinutes: Int
         var resetsAt: Date?
+        var title: String? = nil
     }
 
     struct RateLimitSnapshot: Equatable, Sendable {
         var primary: RateLimitWindow?
         var secondary: RateLimitWindow?
+        var tertiary: RateLimitWindow? = nil
         var observedAt: Date
     }
 
@@ -779,8 +816,9 @@ enum LocalUsageScanner {
 
         let primary = rateLimitWindow(in: value(forNormalizedKey: "primary", in: rateLimits))
         let secondary = rateLimitWindow(in: value(forNormalizedKey: "secondary", in: rateLimits))
-        guard primary != nil || secondary != nil else { return nil }
-        return RateLimitSnapshot(primary: primary, secondary: secondary, observedAt: observedAt)
+        let tertiary = rateLimitWindow(in: value(forNormalizedKey: "tertiary", in: rateLimits))
+        guard primary != nil || secondary != nil || tertiary != nil else { return nil }
+        return RateLimitSnapshot(primary: primary, secondary: secondary, tertiary: tertiary, observedAt: observedAt)
     }
 
     private nonisolated static func rateLimitWindow(in object: Any?) -> RateLimitWindow? {
@@ -796,7 +834,8 @@ enum LocalUsageScanner {
         return RateLimitWindow(
             usedPercent: usedPercent,
             windowMinutes: windowMinutes,
-            resetsAt: value(forNormalizedKey: "resetsat", in: dictionary).flatMap(dateValue))
+            resetsAt: value(forNormalizedKey: "resetsat", in: dictionary).flatMap(dateValue),
+            title: value(forNormalizedKey: "title", in: dictionary) as? String)
     }
 
     private nonisolated static func latest(_ lhs: Date?, _ rhs: Date?) -> Date? {
