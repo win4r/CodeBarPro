@@ -1,3 +1,5 @@
+# [🚀观看我的哔哩哔哩视频](https://space.bilibili.com/3493277319825652)
+
 # CodeBar Pro
 
 ![macOS](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)
